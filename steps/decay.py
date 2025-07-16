@@ -145,6 +145,5 @@ def calculate_decay_factors(pipeline, decay_rate=0.98):
         "numbers": numbers_frequency,
         "powerball": powerball_frequency
     })
-    ## The decay-weighted distributions are now ready for use in subsequent pipeline steps.
 
 

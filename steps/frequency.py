@@ -1,4 +1,4 @@
-## Modified By: Callam Josef Jackson-Sem
+## Modified By: Callam
 ## Project: Lotto Predictor
 ## Purpose of File: To Analyze and Normalize Lottery Number Frequencies
 ## Description:

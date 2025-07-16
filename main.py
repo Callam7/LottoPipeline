@@ -10,7 +10,6 @@
 
 import os  # For operating system-related tasks
 import numpy as np  # For numerical computations
-import matplotlib.pyplot as plt  # For optional visualizations
 from datetime import datetime  # For date and time handling
 
 # Database functions
@@ -34,6 +33,8 @@ from steps.frequency import analyze_number_frequency
 from steps.decay import calculate_decay_factors
 from steps.clustering import kmeans_clustering_and_correlation
 from steps.monte_carlo import monte_carlo_simulation
+from steps.redundancy import sequential_features  # Newly added redundancy import
+
 from steps.deep_learning import deep_learning_prediction
 
 def verify_draw_order():
@@ -204,6 +205,8 @@ def main():
             calculate_decay_factors(pipeline)
             kmeans_clustering_and_correlation(pipeline)
             monte_carlo_simulation(pipeline)
+            # Add redundancy step before Monte Carlo
+            sequential_features(pipeline)
             deep_learning_prediction(pipeline)
 
             # Generate and save the ticket
