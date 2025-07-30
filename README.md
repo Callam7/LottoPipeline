@@ -252,7 +252,7 @@ To set up the project locally, follow these step-by-step instructions for your o
 1. **Clone the Repository**:  
    - Run:
      ```bash
-     git clone https://github.com/your-repo/LottoPipeline.git
+     git clone https://github.com/Callam7/LottoPipeline.git
      cd LottoPipeline
      ```
 2. **Install Python Dependencies**:
@@ -314,7 +314,19 @@ The Lotto Predictor pipeline is designed to simulate, analyze, and predict lotte
   - Analyzes these simulations to create a refined probability distribution.  
   - Adds this enhanced distribution to the pipeline.
 
-### **Step 6: Deep Learning Predictions**
+### **Step 6: Sequential / Temporal Feature Generation (Redundancy)**
+**Module:** `steps/redundancy.py`  
+- **Functionality:**  
+  Generates sequential/temporal features from historical lottery data to capture how recently each number appeared and the average gaps between its occurrences.  
+- **Details:**  
+  - Calculates a normalized recency score indicating how many draws ago each number last appeared (recent draws get a lower score).  
+  - Computes average gap lengths between appearances of each number to measure drawing frequency over time.  
+  - Combines these two metrics into a unified 40-element feature vector, called "redundancy," which adds temporal context beyond static frequency counts.  
+- **Role in Pipeline:**  
+  Enhances the predictive model by providing temporal signals that help identify patterns related to number recurrence and spacing, improving the deep learning model's ability to capture sequential dependencies.
+
+
+### **Step 7: Deep Learning Predictions**
 **Module:** `steps/deep_learning.py`  
 - **Functionality**: Trains a neural network to predict lottery number probabilities based on all previous data.  
 - **Details**:  
@@ -323,7 +335,7 @@ The Lotto Predictor pipeline is designed to simulate, analyze, and predict lotte
   - Outputs a refined probability distribution for the lottery numbers.  
   - Adds the deep learning predictions to the pipeline.
 
-### **Step 7: Ticket Generation**
+### **Step 8: Ticket Generation**
 **Module:** `steps/generate_ticket.py`  
 - **Functionality**: Combines all refined probabilities to generate 12 diverse and optimized ticket lines.  
 - **Details**:  
