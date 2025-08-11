@@ -1,90 +1,30 @@
 # Lotto Generator
 
-**Author's Note**:  
-There is no guarantee that this project will predict lottery numbers with pinpoint accuracy. This is a proof of concept, designed to showcase my ability to develop a scalable pipeline and explore the potential of data-driven methods. 
+**Author's Note**  
+This project will not predict lottery numbers with perfect accuracy. It’s a proof of concept to test ideas, build a scalable pipeline, and see how far different methods can push results against noisy, pseudo-random data.
 
-I created this project because I found it a bit annoying when Lotto advertised that "there is no method to playing Lotto; it's just random." While it's true that lottery draws are highly unpredictable, this statement isn't entirely accurate. If we consider the finite set of rules they’ve put in place—numbers between 1-40 for the main draw and 1-10 for the Powerball—we can see that it’s not truly random but *pseudo-random*. With a sophisticated approach, patterns can absolutely be analyzed, and methods can be applied to improve decision-making. This project was designed to challenge that misconception and to explore how far we can push those boundaries using modern computational techniques.
+It started as a challenge to the claim that Lotto is “just random.” While draws are unpredictable, they follow fixed rules — main numbers 1–40, Powerball 1–10 — which makes them pseudo-random. That means patterns can be measured and methods applied to guide number selection.
+
+The project has since shifted toward laying the groundwork for a self-editing adaptive model. The idea is for the system to train on historical data, evaluate its own performance, and adjust over time. This hasn’t been reached yet, but the current pipeline is built to allow it.
 
 ---
 
 ## Purpose
-The **Lotto Generator** is an advanced Python-based application designed to analyze historical lottery draw data and generate optimized lottery tickets with a higher likelihood of success.
 
-By combining statistical techniques, clustering algorithms, Monte Carlo simulations, and machine learning models, the pipeline identifies patterns in historical draws and uses this information to predict future trends. This allows for data-driven ticket generation, maximizing diversity and leveraging past performance to improve probabilities.
+The **Lotto Generator** is a Python application that analyzes historical lottery data and generates tickets based on multiple statistical and machine learning methods.
 
----
+It uses a pipeline of “pipes” — statistical analysis, clustering, Monte Carlo simulation, Markov chains, Shannon entropy, and deep learning. Each pipe produces features from the historical draws, which are combined and used to train the deep learning model.
 
-## Key Functionalities
-- **Data Analysis**: Processes historical lottery data to uncover frequency distributions and decay factors.  
-- **Probability Estimation**: Simulates thousands of potential draws using Monte Carlo methods and predictive models.  
-- **Machine Learning**: Utilizes a deep learning neural network to refine predictions based on past outcomes.  
-- **Ticket Optimization**: Employs a diversity mechanism to generate distinct and balanced tickets, reducing redundancy.  
-
-This project bridges the gap between statistical analysis and predictive modeling, making it a powerful tool for anyone looking to optimize their lottery strategies.
+The long-term goal is for the pipeline to update and re-train itself automatically as new draws come in, with the aim of improving accuracy while avoiding overfitting. For now, Lotto is just the sandbox for testing these methods.
 
 ---
 
 ## Table of Contents
 1. [Introduction](#lotto-generator)  
-2. [Purpose](#purpose)  
-3. [Key Functionalities](#key-functionalities)  
-4. [Features](#features)  
-5. [Installation Instructions](#installation-instructions)  
-6. [Pipeline Explanation](#pipeline-explanation)  
-7. [Project Structure](#project-structure)  
-
----
-
-## Features
-
-1. **Dynamic Pipeline for Lottery Data Analysis**  
-   - A scalable and modular pipeline designed to process, analyze, and predict lottery outcomes.  
-   - Integrates multiple stages such as historical data processing, frequency analysis, clustering, decay factor application, and deep learning.  
-   - Each step is independent, allowing for easy updates or replacements without breaking the pipeline.
-
-2. **Advanced Statistical and Mathematical Analysis**  
-   - Incorporates sophisticated statistical models to analyze lottery trends and probabilities.  
-   - Uses clustering (via K-Means) to identify hidden patterns in historical draw data.  
-   - Applies decay factors to give recent draws more weight, simulating a realistic and dynamic approach to probability adjustments.
-
-3. **Monte Carlo Simulation**  
-   - Generates thousands of random lottery combinations based on weighted probabilities.  
-   - Provides a robust probability distribution for the 40 main numbers and Powerball.
-
-4. **Deep Learning for Prediction**  
-   - Trains a neural network to predict the likelihood of each lottery number appearing in future draws.  
-   - Combines decay factors, clustering information, and Monte Carlo outputs for enhanced accuracy.  
-   - The AI model adapts dynamically to the size and scope of historical data, using a sophisticated training regimen.
-
-5. **Ticket Generation with Diversity Penalty**  
-   - Generates 12 unique lottery lines with a penalty-based mechanism to ensure number diversity.  
-   - Balances predictions from the neural network and decay factors for optimal number selection.  
-   - Prevents repetitive combinations to increase the coverage of possible outcomes.
-
-6. **Comprehensive Database Integration**  
-   - Stores historical draw data and user-generated tickets in a robust SQLite database.  
-   - Ensures chronological ordering and consistency of draw records.  
-   - Fetches recent or specific historical draws for analysis.
-
-7. **User-Friendly Console Menu**  
-   - Provides an interactive menu for:
-     - Viewing current tickets.
-     - Listing recent draws.
-     - Adding new draws and generating tickets.
-     - Viewing number frequency statistics.  
-   - Guides users step-by-step through all available functionalities.
-
-8. **Scalability and Extensibility**  
-   - The modular design allows for future improvements, such as additional AI models or new statistical techniques.  
-   - Can be adapted for other applications involving probabilistic modeling and prediction.
-
-9. **Proof of Concept for Pseudo-Random Systems**  
-   - Challenges the misconception of true randomness in lotteries by demonstrating the use of structured methods to analyze and predict outcomes.  
-   - Validates the hypothesis that lottery results, being a finite set within defined rules, follow pseudo-random patterns.
-
-10. **Data Visualization (Planned Feature)**  
-   - Planned implementation of visualizing trends and predictions to enhance user insights.  
-   - Graphs and heatmaps will display the frequency distribution of numbers and prediction accuracies.
+2. [Purpose](#purpose)   
+3. [Installation Instructions](#installation-instructions)  
+4. [Pipeline Explanation](#pipeline-explanation)  
+5. [Future Additions](#future-additions)  
 
 ---
 
@@ -252,7 +192,7 @@ To set up the project locally, follow these step-by-step instructions for your o
 1. **Clone the Repository**:  
    - Run:
      ```bash
-     git clone https://github.com/Callam7/LottoPipeline.git
+     git clone https://github.com/your-repo/LottoPipeline.git
      cd LottoPipeline
      ```
 2. **Install Python Dependencies**:
@@ -276,121 +216,180 @@ The Lotto Predictor pipeline is designed to simulate, analyze, and predict lotte
 
 ### **Step 1: Historical Data Processing**
 **Module:** `steps/historical.py`  
-- **Functionality**: Processes historical lottery draw data to ensure only valid draws are included in the pipeline.  
-- **Details**:  
-  - Filters out draws with invalid Powerball numbers or missing data.  
-  - Stores the cleaned historical data in the pipeline for downstream use.
+- **Functionality**: This is the first stage of the pipeline. It loads, validates, and filters historical lottery draws before any other processing takes place. The idea is to ensure every downstream method works only with clean, valid data.
+
+- **How it works**  
+ - Retrieves past draw results from the input or connected database  
+ - Filters out any draw with an invalid Powerball (must be 1–10)  
+ - Passes only valid draws forward through the pipeline  
+
+- **Why it’s important:**  
+ Garbage in means garbage out. By validating historical draws at the start, the rest of the pipeline is trained and tested on trustworthy data. This step directly improves the reliability of all downstream statistical, clustering, and machine learning processes.
 
 ### **Step 2: Frequency Analysis**
 **Module:** `steps/frequency.py`  
-- **Functionality**: Analyzes the frequency of each lottery number based on historical draws.  
-- **Details**:  
-  - Calculates how often each number (1-40) appears in historical draws.  
-  - Produces a normalized probability distribution to emphasize frequently drawn numbers.  
-  - Adds this distribution to the pipeline for later processing.
+- **Functionality**: Calculates how often each main number (1–40) has been drawn historically, then converts those counts into a normalized probability distribution. This ensures later stages of the pipeline can work with weighted probabilities instead of treating all numbers equally.
+ 
+- **How it works**:  
+  - Loads historical draw data from the pipeline  
+  - Filters out invalid numbers outside the 1–40 range  
+  - Counts how many times each number appears in valid draws  
+  - Normalizes the counts so the total probability equals 1  
+  - Stores the probability distribution in the pipeline for later steps
+
+**Why it’s important**:
+- This step lets downstream models prioritize numbers that appear more often in past draws, without overfitting. If no valid data exists, a uniform distribution is used to keep the pipeline functional.
 
 ### **Step 3: Decay Factors Calculation**
 **Module:** `steps/decay.py`  
-- **Functionality**: Applies a time-based decay to historical data, giving more weight to recent draws.  
-- **Details**:  
-  - Adjusts the frequency of numbers and Powerball values based on their recency.  
-  - Creates a probability distribution where recent numbers are weighted more heavily than older ones.  
-  - Adds the decay-adjusted frequency data to the pipeline.
+- **Functionality**: Applies a decay factor to historical lottery results so that recent draws have more influence than older draws. This is based on the assumption that more recent outcomes may better reflect current draw trends.
+  
+- **How it works**:  
+   - Retrieves historical draw data from the pipeline  
+   - Sorts draws chronologically by their draw date  
+   - For each draw, calculates the time difference from the previous draw in weeks  
+   - Applies a decay rate (default 0.98) raised to the number of weeks passed  
+   - Adds decay-weighted counts for both main numbers (1–40) and Powerball numbers (1–10)  
+   - Normalizes the counts into probability distributions so the total probability equals 1  
+   - Stores the decay-weighted probabilities in the pipeline under `decay_factors`
+
+**Why it’s important**:
+- This step allows the model to focus more on recent patterns without discarding older results entirely. By weighting data based on recency, it captures potential short-term trends while still incorporating long-term historical context.
 
 ### **Step 4: Clustering and Correlation**
 **Module:** `steps/clustering.py`  
-- **Functionality**: Groups numbers into clusters based on their frequency distribution to identify patterns.  
-- **Details**:  
-  - Uses K-Means clustering to group numbers into clusters.  
-  - Calculates centroids for each cluster to emphasize or de-emphasize certain groups.  
-  - Adds cluster labels and centroids to the pipeline for probability adjustment.
+- **Functionality**: Groups lottery numbers into clusters based on their historical draw frequencies. This helps reveal underlying patterns or tendencies that may not be obvious from raw counts alone.
+ 
+- **How it works**:  
+   - Retrieves normalized frequency data for both main numbers (1–40) and Powerball numbers (1–10) from the pipeline  
+   - Scales the data to a [0, 1] range using MinMaxScaler for consistent clustering behavior  
+   - Applies K-Means clustering separately to main numbers and Powerball numbers  
+   - Dynamically reduces cluster count if the variance in frequency data is too low to form distinct groups  
+   - Extracts cluster labels and centroids for each group  
+   - Stores results in the pipeline:
+  	- `clusters` and `centroids` for main numbers  
+  	- `powerball_clusters` and `powerball_centroids` for Powerball numbers  
+  	- `number_to_cluster` mapping for quick reference
+
+- **Why it’s important**:
+- By grouping numbers with similar draw patterns, the model can identify trends that extend beyond simple frequency counts. This provides a richer feature set for downstream predictive modeling and can be combined with decay-weighted data, entropy measures, or other features to improve prediction stability.
 
 ### **Step 5: Monte Carlo Simulations**
 **Module:** `steps/monte_carlo.py`  
-- **Functionality**: Simulates lottery draws using adjusted probabilities to refine number predictions.  
-- **Details**:  
-  - Combines decay factors, cluster centroids, and frequency data to adjust probabilities.  
-  - Runs Monte Carlo simulations to generate a large dataset of simulated draws.  
-  - Analyzes these simulations to create a refined probability distribution.  
-  - Adds this enhanced distribution to the pipeline.
+- **Functionality**: Generates multiple simulated lottery outcomes based on probability distributions from earlier pipeline steps, allowing the model to estimate likely future draws.
+  
+- **How it works**:  
+   - Retrieves probability distributions for main numbers (1–40) and Powerball numbers (1–10) from the pipeline  
+   - Runs a set number of simulations (e.g., 10,000)  
+   - In each simulation:  
+     - Randomly selects 6 unique main numbers based on their probabilities  
+     - Randomly selects 1 Powerball number based on its probability distribution  
+   - Tracks how often each number appears across all simulations  
+   - Normalizes the counts into probability distributions  
+   - Stores results in the pipeline under `monte_carlo_results`
 
-### **Step 6: Sequential / Temporal Feature Generation (Redundancy)**
-**Module:** `steps/redundancy.py`  
-- **Functionality:**  
-  Generates sequential/temporal features from historical lottery data to capture how recently each number appeared and the average gaps between its occurrences.  
-- **Details:**  
-  - Calculates a normalized recency score indicating how many draws ago each number last appeared (recent draws get a lower score).  
-  - Computes average gap lengths between appearances of each number to measure drawing frequency over time.  
-  - Combines these two metrics into a unified 40-element feature vector, called "redundancy," which adds temporal context beyond static frequency counts.  
-- **Role in Pipeline:**  
-  Enhances the predictive model by providing temporal signals that help identify patterns related to number recurrence and spacing, improving the deep learning model's ability to capture sequential dependencies.
+**Why it’s important**:  
+- Monte Carlo simulation uses repeated random sampling to account for probability-based uncertainty. It helps the model identify numbers that consistently appear across thousands of trials, improving prediction reliability.
+
+### Step 5: Sequential / Temporal Feature Generation (Redundancy)
+**Module:** `steps/redundancy.py`
+- **Functionality**: Extracts temporal features from historical lottery draws, capturing how recently each number was drawn and the average gaps between its appearances. These features provide context on number recurrence patterns to improve prediction models.
+
+**How it works**  
+  - Retrieves historical draw data from the pipeline  
+  - Calculates recency for each number (1–40): how many draws ago it last appeared, normalized between 0 (recent) and 1 (old)  
+  - Calculates average gap length between appearances for each number, normalized by total draws  
+  - Combines recency and gap features into a single 40-element feature vector  
+  - Stores the combined features in the pipeline under `redundancy`
+
+**Why it’s important**:  
+- Including sequential and temporal features helps the model understand patterns beyond simple frequency, like how often numbers repeat or cluster over time. This enriches the predictive signal for deep learning by adding sequential context.
 
 
-### **Step 7: Deep Learning Predictions**
-**Module:** `steps/deep_learning.py`  
-- **Functionality**: Trains a neural network to predict lottery number probabilities based on all previous data.  
-- **Details**:  
-  - Combines Monte Carlo data, decay factors, and clustering outputs into feature vectors.  
-  - Trains a neural network with historical data using data augmentation to improve generalization.  
-  - Outputs a refined probability distribution for the lottery numbers.  
-  - Adds the deep learning predictions to the pipeline.
+### **Step 6: First-Order Markov Chain Transition Features**
+**Module:** `steps/markov.py`  
+- **Functionality**: Generates features representing the probabilities of transitioning from one cluster of numbers to another based on historical draw sequences. This captures temporal dynamics of cluster behavior to enhance prediction.
+  
+- **How it works**:  
+  - Retrieves historical draw data, cluster assignments for numbers, and redundancy features from the pipeline  
+  - Constructs a sequence of average cluster IDs for each draw by averaging the clusters of drawn numbers  
+  - Builds a transition matrix showing probabilities of moving from one cluster state to another (first-order Markov chain)  
+  - Scores each number based on the average transition probabilities of its cluster  
+  - Optionally weights scores by redundancy (temporal features)  
+  - Normalizes scores into a probability distribution and stores them in the pipeline under `markov_features`
 
-### **Step 8: Ticket Generation**
-**Module:** `steps/generate_ticket.py`  
-- **Functionality**: Combines all refined probabilities to generate 12 diverse and optimized ticket lines.  
-- **Details**:  
-  - Uses a weighted combination of deep learning predictions and decay-adjusted probabilities.  
-  - Implements a penalty-based diversity mechanism to ensure no repeated ticket lines.  
-  - Selects Powerball numbers based on decay-adjusted probabilities.  
-  - Saves the generated ticket lines in a JSON file for user reference.
+**Why it’s important**:
+- Markov transition features encode the temporal dependencies between clusters of numbers, allowing the model to leverage patterns of cluster transitions over time, which static frequency counts alone cannot capture.
 
-### **Final Output: A Complete Ticket**
-The pipeline produces a ticket with 12 unique lines of 6 main numbers (1-40) and 1 Powerball number (1-10). Each number is carefully calculated using historical data, frequency analysis, decay factors, clustering, Monte Carlo simulations, and deep learning.
+### **Step 7: Shannon Entropy Features**
+**Module:** `steps/entropy.py`  
+- **Functionality**: Calculates the Shannon entropy rate of the lottery number process using Markov chain transitions between clusters. Entropy measures the unpredictability of number sequences, helping identify how much randomness or structure exists in cluster transitions.
+  
+- **How it works**:  
+   - Retrieves clusters, number-to-cluster mappings, centroids, redundancy, Markov scores, and historical data from the pipeline  
+   - Builds a sequence of clusters representing each historical draw’s average cluster  
+   - Constructs a Markov transition matrix between clusters based on this sequence  
+   - Computes the stationary distribution (long-term probabilities) of the Markov chain  
+   - Calculates the entropy rate (overall unpredictability) and entropy per cluster state  
+   - Assigns entropy scores to each number according to its cluster  
+   - Applies redundancy weighting to emphasize recently active numbers  
+   - Normalizes the entropy scores into a probability distribution  
+   - Stores the entropy features in the pipeline under `entropy_features`
 
-This multi-step approach ensures the final ticket is not entirely random but informed by statistical patterns and refined probabilities.
+**Why it’s important**:  
+- Entropy quantifies the amount of uncertainty in the lottery number sequences. Including entropy-based features allows the model to capture and leverage the complexity and randomness inherent in number transitions, improving predictive insights.
+
+### **Step 8: Deep Learning Model (Tensorflow/Binary Crossentropy**
+**Module:** `steps/deep_learning.py`
+- **Functionality**: Attempts to predict probabilities for the 40 main lottery numbers using a deep learning model. It integrates diverse features from earlier steps—historical data, decay-weighted frequencies, Monte Carlo simulations, clustering, redundancy, Markov transition probabilities, and entropy—into a single predictive framework.
+
+**How it works**  
+  - Retrieves necessary input data from the pipeline, including historical draws, decay factors, Monte Carlo results, clusters, centroids, redundancy features, Markov features, and entropy features.  
+  - Normalizes all input features individually to ensure consistent scale.  
+  - Combines normalized features along with cluster centroid information into a feature matrix (shape: 40 numbers × multiple features).  
+  - Constructs binary multi-label targets from historical draws, applying label smoothing to reduce overconfidence.  
+  - Calculates class weights to counter class imbalance (numbers drawn less frequently get higher weights).  
+  - Defines a custom weighted binary crossentropy loss function incorporating class weights.  
+  - Performs data augmentation by injecting Gaussian noise into the input features to improve generalization.  
+  - Sets dynamic training parameters (number of epochs, etc.) based on dataset size.  
+  - Builds a neural network model with two hidden layers (128 and 64 units), ReLU activations, batch normalization, dropout for regularization, and sigmoid output for independent probabilities per number.  
+  - Compiles the model with Adam optimizer and the custom loss function, tracking binary accuracy, AUC, and MAE metrics.  
+  - Trains the model on augmented data using early stopping and learning rate reduction callbacks to optimize training.  
+  - Predicts the probability for each number independently on the original feature set and averages predictions.  
+  - Stores the resulting normalized probability distribution of number predictions in the pipeline under `deep_learning_predictions`.
+
+**Why it’s important**:  
+- This step synthesizes all prior analytical features into a learned nonlinear model that can capture complex interactions and dependencies among lottery numbers. It outputs a refined probability distribution reflecting the model’s best estimate of each number’s likelihood, forming the core predictive signal for ticket generation.
+
+
+### **Final Step: Ticket Generation**
+**Module:** `steps/generate_ticket.py`
+- **Functionality**: Generates a full set of lottery ticket lines using the final deep learning predictions. This step consolidates all prior analysis into concrete ticket lines for play.
+
+**How it works**  
+  - Retrieves the deep learning probability distribution for the 40 main numbers from the pipeline.  
+  - Applies a safety fallback to a uniform distribution if predictions are missing.  
+  - Normalizes probabilities to ensure they sum to 1 and clips to avoid zeros.  
+  - Uses a diversity penalty mechanism to reduce repetition across the 12 generated lines, by lowering the probabilities of numbers already selected in prior lines.  
+  - For each line, randomly selects 6 unique main numbers based on the adjusted probabilities, ensuring no duplicate lines are created.  
+  - Selects the Powerball number weighted by decay-weighted historical frequencies if available; otherwise uses a uniform distribution.  
+  - Updates frequency penalties after each line to promote diversity in future lines.  
+  - Saves the final set of 12 ticket lines (main numbers + Powerball) to a JSON file for downstream use.
+
+**Why it’s important**:  
+- This final step transforms the probabilistic predictions into actual ticket selections while maintaining diversity and respecting the nuanced influences learned throughout the pipeline. It operationalizes the model output into actionable lottery tickets.
 
 ---
 
-## Project Structure
+### 5. Future Additions
 
-The project is organized into clearly defined files and folders to ensure modularity, readability, and ease of maintenance. Below is an overview of the structure and the purpose of each major component:
+My next focus will be on implementing thorough pytesting for each pipeline step to ensure correctness, stability, and consistent outputs. Automated tests will validate input handling, edge cases, and integration between pipes.
 
-### Root Directory
-- **`current_ticket.json`**: A dynamically updated file that stores the most recently generated lottery ticket in JSON format.  
-- **`database.py`**: Handles all SQLite database interactions, including initializing the database, inserting draws, and fetching historical data.  
-- **`data_io.py`**: Manages the input/output of generated ticket data, ensuring the integrity of saved and loaded tickets.  
-- **`main.py`**: The entry point of the project, providing an interactive console menu for managing lottery draws, generating tickets, and viewing statistics.  
-- **`pipeline.py`**: Defines the `DataPipeline` class, enabling data sharing across different processing steps, and implements utility functions for dynamic parameter generation.
+Following testing, I will plan on building a comprehensive logging system that captures detailed metrics and stats for every epoch and pipeline execution. These logs will be stored systematically for auditing, debugging, and performance tracking over time.
+
+Finally, we plan to integrate automation that leverages a self-editing model. This model will dynamically adapt the pipeline by analyzing logs and test results, enabling continuous improvement and fine-tuning of prediction accuracy and processing efficiency without manual intervention.
 
 ---
 
-### `/steps`
-This folder contains modular scripts responsible for each stage of the pipeline. Each script processes data or generates probabilities for lottery predictions.
 
-- **`clustering.py`**: Performs K-Means clustering on number frequency data to uncover patterns and correlations.  
-- **`decay.py`**: Calculates decay factors to give more weight to recent draws and adjusts probabilities dynamically.  
-- **`deep_learning.py`**: Trains a neural network to predict the likelihood of each lottery number appearing in future draws.  
-- **`frequency.py`**: Analyzes the frequency of lottery numbers from historical data and generates a normalized probability distribution.  
-- **`generate_ticket.py`**: Combines neural network predictions and decay factors to generate diverse and weighted lottery tickets.  
-- **`historical.py`**: Processes historical draw data, validates it, and integrates it into the pipeline.  
-- **`monte_carlo.py`**: Runs Monte Carlo simulations to create probabilistic models for lottery number prediction.
-
----
-
-### Project Overview
-
-| **File/Folder**          | **Purpose**                                                                                   |
-|--------------------------|-----------------------------------------------------------------------------------------------|
-| `current_ticket.json`    | Stores the most recently generated lottery ticket in JSON format.                             |
-| `database.py`            | Manages the SQLite database for storing and querying draw data.                               |
-| `data_io.py`             | Handles saving and loading ticket data to/from `current_ticket.json`.                         |
-| `main.py`                | Entry point of the project, providing a user-friendly interface for running the pipeline.     |
-| `pipeline.py`            | Implements the data pipeline to coordinate and share data across different steps.            |
-| `/steps/clustering.py`   | Clusters number frequencies using K-Means to identify patterns.                               |
-| `/steps/decay.py`        | Adjusts probabilities dynamically using decay factors to emphasize recent draws.             |
-| `/steps/deep_learning.py`| Uses a neural network to predict the probability of each lottery number appearing.            |
-| `/steps/frequency.py`    | Computes the normalized frequency of numbers from historical data.                            |
-| `/steps/generate_ticket.py` | Generates 12 diverse ticket lines by combining decay factors and neural network predictions. |
-| `/steps/historical.py`   | Processes and validates historical draw data for use in the pipeline.                         |
-| `/steps/monte_carlo.py`  | Runs Monte Carlo simulations to create probabilistic models for number selection.             |
 
