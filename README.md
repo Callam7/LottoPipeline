@@ -192,7 +192,7 @@ To set up the project locally, follow these step-by-step instructions for your o
 1. **Clone the Repository**:  
    - Run:
      ```bash
-     git clone https://github.com/your-repo/LottoPipeline.git
+     git clone https://github.com/Callam7/LottoPipeline.git
      cd LottoPipeline
      ```
 2. **Install Python Dependencies**:
@@ -212,7 +212,7 @@ You're now ready to use the Lotto Generator!
 
 ## Pipeline Explanation
 
-The Lotto Predictor pipeline is designed to simulate, analyze, and predict lottery outcomes using a series of interconnected steps. Each module contributes a specific functionality to the final output: a ticket with 12 lines of lottery numbers and corresponding Powerball numbers. Below is a chronological breakdown of the pipeline flow:
+The Lotto Pipeline is designed to simulate, analyze, and predict lottery outcomes using a series of interconnected steps. Each module contributes a specific functionality to the final output: a ticket with 12 lines of lottery numbers and corresponding Powerball numbers. Below is a chronological breakdown of the pipeline flow:
 
 ### **Step 1: Historical Data Processing**
 **Module:** `steps/historical.py`  
