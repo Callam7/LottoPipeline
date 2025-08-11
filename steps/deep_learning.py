@@ -4,13 +4,14 @@
 ## Description:
 ## This file utilizes a deep learning model to predict probabilities for the 40 main lottery numbers.
 ## The model leverages historical data, decay factors, Monte Carlo results, clustering information,
-## and redundancy (recency/gap) data. The predictions are normalized to produce a probability distribution,
-## which is used in ticket generation.
+## redundancy (recency/gap) data, and newly added Markov transition probabilities.
+## The predictions are normalized to produce a probability distribution, which is used in ticket generation.
 
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from pipeline import get_dynamic_params
+
 
 def deep_learning_prediction(pipeline):
     """
@@ -35,27 +36,40 @@ def deep_learning_prediction(pipeline):
     monte_carlo = pipeline.get_data("monte_carlo")
     clusters = pipeline.get_data("clusters")
     centroids = pipeline.get_data("centroids")
-    redundancy = pipeline.get_data("redundancy")  # Newly added redundancy data
+    redundancy = pipeline.get_data("redundancy")  # Recency/gap data
+    markov = pipeline.get_data("markov_features")  # Newly added Markov transition probabilities
+    entropy = pipeline.get_data("entropy_features")  # NEW
 
-    if any(v is None for v in [decay_factors, monte_carlo, clusters, centroids, redundancy]):
+
+    if any(v is None for v in [decay_factors, monte_carlo, clusters, centroids, redundancy, markov]):
         print("Necessary data missing for deep learning prediction.")
         pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
         return
 
-    # Step 2: Normalize decay factors, Monte Carlo results, and redundancy
+    # Step 2: Normalize decay factors, Monte Carlo results, redundancy, and Markov data
     df_max = max(decay_factors["numbers"].max(), 1e-12)
     mc_max = max(monte_carlo.max(), 1e-12)
     red_max = max(redundancy.max(), 1e-12)
+    mk_max = max(markov.max(), 1e-12)
+    ent_max = max(entropy.max(), 1e-12)  # NEW
+
 
     decay_factors_norm = decay_factors["numbers"] / df_max
     monte_carlo_norm = monte_carlo / mc_max
     redundancy_norm = redundancy / red_max
+    markov_norm = markov / mk_max
+    entropy_norm = entropy / ent_max  # NEW
 
-    # Step 3: Assemble feature set by combining decay, Monte Carlo, redundancy, and cluster centroids
+
+
+
+    # Step 3: Assemble feature set by combining decay, Monte Carlo, redundancy, Markov, and cluster centroids
     features = np.column_stack((
         decay_factors_norm,
         monte_carlo_norm,
         redundancy_norm,
+        markov_norm,
+        entropy_norm,           # NEW
         centroids[clusters]
     ))
 
@@ -160,4 +174,5 @@ def deep_learning_prediction(pipeline):
 
     # Step 14: Store prediction result in the pipeline
     pipeline.add_data("deep_learning_predictions", final_prediction)
+
 

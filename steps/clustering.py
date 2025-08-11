@@ -59,6 +59,8 @@ def kmeans_clustering_and_correlation(pipeline, n_clusters=5):
         # Step 7: Store results in pipeline
         pipeline.add_data("clusters", labels)
         pipeline.add_data("centroids", centroids)
+        pipeline.add_data("number_to_cluster", labels)
+
         logging.info("Main number clustering completed successfully.")
 
     except Exception as e:
