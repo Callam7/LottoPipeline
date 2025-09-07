@@ -36,6 +36,8 @@ from steps.monte_carlo import monte_carlo_simulation
 from steps.redundancy import sequential_features 
 from steps.markov import markov_features
 from steps.entropy import shannon_entropy_features
+from steps.bayesian_fusion import bayesian_fusion_with_mechanics
+
 
 
 from steps.deep_learning import deep_learning_prediction
@@ -151,7 +153,7 @@ def main():
                 print("No historical draws available.")
             else:
                 print("\n--- Last 10 Draws ---")
-                for draw in reversed(last_draws):
+                for draw in last_draws:
                     print(f"Date: {draw['draw_date']} | "
                           f"Numbers: {draw['numbers']} | "
                           f"Bonus: {draw['bonus']} | "
@@ -206,6 +208,7 @@ def main():
             process_historical_data({"past_results": all_draws}, pipeline)
             analyze_number_frequency(pipeline)
             calculate_decay_factors(pipeline)
+            bayesian_fusion_with_mechanics(pipeline)
             kmeans_clustering_and_correlation(pipeline)
             monte_carlo_simulation(pipeline)
             sequential_features(pipeline)

@@ -1,11 +1,14 @@
-## Modified By: Callam
+## Modified By: Callam Josef Jackson-Sem
 ## Project: Lotto Predictor
 ## Purpose of File: Generate Markov Transition Features from Clustered Historical Data
 ## Description:
 ## This file calculates first-order Markov chain transition probabilities based on the clustering 
 ## and recency of past draw results. The transition matrix represents the likelihood of moving 
-## from one cluster state to another, incorporating both temporal behavior and cluster dynamics. 
-## These features are flattened and stored in the pipeline to be consumed by the deep learning step.
+## from one cluster state to another. These features are flattened and stored in the pipeline 
+## to be consumed by the deep learning step.
+
+# -*- coding: utf-8 -*-
+
 
 import numpy as np
 import logging
@@ -13,10 +16,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def generate_markov_matrix(cluster_sequence, num_clusters):
-    # Build a transition matrix of shape [num_clusters x num_clusters]
+    """
+    Build a transition matrix of shape [num_clusters x num_clusters]
+    where entry (i, j) represents the probability of moving
+    from cluster i to cluster j in one step.
+    """
     matrix = np.zeros((num_clusters, num_clusters), dtype=float)
     
-    # Count transitions from previous cluster to current
+    # Count transitions from previous cluster to current cluster
     for i in range(1, len(cluster_sequence)):
         prev = cluster_sequence[i - 1]
         curr = cluster_sequence[i]
@@ -30,7 +37,11 @@ def generate_markov_matrix(cluster_sequence, num_clusters):
 
     return matrix
 
+
 def markov_features(pipeline):
+    """
+    Generate Markov chain-based features for lottery numbers and store in the pipeline.
+    """
     historical_data = pipeline.get_data("historical_data")
     number_to_cluster = pipeline.get_data("number_to_cluster")
     redundancy = pipeline.get_data("redundancy")
@@ -44,16 +55,16 @@ def markov_features(pipeline):
     # Determine number of clusters used in training
     num_clusters = int(np.max(number_to_cluster)) + 1
 
-    # Build a sequence of average cluster IDs per draw
+    # Build a sequence of cluster IDs across draws without averaging
     cluster_sequence = []
     for draw in historical_data:
         numbers = draw.get("numbers")
         if not numbers:
             continue
         try:
-            cluster_ids = [number_to_cluster[n - 1] for n in numbers if 1 <= n <= 40]
-            average_cluster = int(round(np.mean(cluster_ids)))
-            cluster_sequence.append(average_cluster)
+            for n in numbers:
+                if 1 <= n <= 40:
+                    cluster_sequence.append(number_to_cluster[n - 1])
         except Exception as e:
             logging.warning(f"Skipping malformed draw: {draw} -- {e}")
 
@@ -66,12 +77,13 @@ def markov_features(pipeline):
     # Generate transition probability matrix from cluster sequence
     transition_matrix = generate_markov_matrix(cluster_sequence, num_clusters)
 
-    # Each number is scored based on its cluster's average transition likelihood
+    # Score each number based on its cluster's transition probabilities
     scores = np.zeros(40)
     for n in range(40):
         cluster_id = number_to_cluster[n]
         if 0 <= cluster_id < num_clusters:
-            scores[n] = np.mean(transition_matrix[cluster_id])
+            # Instead of row mean, use the cluster's row distribution strength
+            scores[n] = transition_matrix[cluster_id].mean()
 
     # Optionally apply redundancy weighting if available
     if redundancy is not None and len(redundancy) == 40:
@@ -87,6 +99,7 @@ def markov_features(pipeline):
 
     pipeline.add_data("markov_features", scores)
     logging.info("Markov features integrated successfully.")
+
 
 
 
