@@ -3,7 +3,7 @@
 ## Purpose of File: Deep Learning Prediction for Lottery Numbers
 ## Description:
 ## This file utilizes a deep learning model to predict probabilities for the 40 main lottery numbers
-## as well as the powerball range between 1-10. The model leverages historical data, decay factors,
+## as well as the powerball range between 1-10. The model leverages historical data,
 ## Monte Carlo results, clustering information, redundancy (recency/gap) data, Markov transition
 ## probabilities, entropy, and Bayesian fusion. The predictions are normalized to produce a probability
 ## distribution, which is used in ticket generation.
@@ -33,7 +33,6 @@ def deep_learning_prediction(pipeline):
         pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
         return
 
-    decay_factors = pipeline.get_data("decay_factors")
     monte_carlo = pipeline.get_data("monte_carlo")
     clusters = pipeline.get_data("clusters")
     centroids = pipeline.get_data("centroids")
@@ -42,35 +41,32 @@ def deep_learning_prediction(pipeline):
     entropy = pipeline.get_data("entropy_features")   # Entropy features
     fusion_norm = pipeline.get_data("bayesian_fusion_norm")  # Bayesian fusion (normalized for DL)
 
-    if any(v is None for v in [decay_factors, monte_carlo, clusters, centroids,
+    if any(v is None for v in [monte_carlo, clusters, centroids,
                                redundancy, markov, entropy, fusion_norm]):
         print("Necessary data missing for deep learning prediction.")
         pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
         return
 
     # Step 2: Normalize inputs
-    df_max = max(decay_factors["numbers"].max(), 1e-12)
     mc_max = max(monte_carlo.max(), 1e-12)
     red_max = max(redundancy.max(), 1e-12)
     mk_max = max(markov.max(), 1e-12)
     ent_max = max(entropy.max(), 1e-12)
     fu_max = max(fusion_norm.max(), 1e-12)
 
-    decay_factors_norm = decay_factors["numbers"] / df_max
     monte_carlo_norm = monte_carlo / mc_max
     redundancy_norm = redundancy / red_max
     markov_norm = markov / mk_max
     entropy_norm = entropy / ent_max
     fusion_norm = fusion_norm / fu_max   # re-safeguard to [0,1]
 
-    # Step 3: Assemble feature set
+    # Step 3: Assemble feature set (decay removed)
     features = np.column_stack((
-        decay_factors_norm,
         monte_carlo_norm,
         redundancy_norm,
         markov_norm,
         entropy_norm,
-        fusion_norm,            # <<-- NEW: Bayesian Fusion
+        fusion_norm,            # Bayesian Fusion
         centroids[clusters]
     ))
 
@@ -80,7 +76,7 @@ def deep_learning_prediction(pipeline):
         binary_label = np.zeros(40)
         for num in draw["numbers"]:
             if 1 <= num <= 40:
-                binary_label[num - 1] = 0.95  # hardcoded label smoothing
+                binary_label[num - 1] = 0.95  # label smoothing
         labels.append(binary_label)
     labels = np.array(labels)
 
@@ -101,8 +97,8 @@ def deep_learning_prediction(pipeline):
     # Step 7: Data augmentation
     augmented_features = []
     augmented_labels = []
-    for _ in range(100):  # augmentation_rounds hardcoded
-        noise = np.random.normal(0, 0.05, features.shape)  # gaussian_noise_std hardcoded
+    for _ in range(100):
+        noise = np.random.normal(0, 0.05, features.shape)
         augmented_features.append(features + noise)
         augmented_labels.extend(labels)
 
@@ -116,11 +112,11 @@ def deep_learning_prediction(pipeline):
     # Step 9: Define model architecture
     model = keras.Sequential([
         keras.layers.Input(shape=(features.shape[1],)),
-        keras.layers.Dense(128, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),  # dense_units[0], l2_reg
+        keras.layers.Dense(128, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
         keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.2),  # dropout_rate
+        keras.layers.Dropout(0.2),
 
-        keras.layers.Dense(64, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),  # dense_units[1]
+        keras.layers.Dense(64, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
         keras.layers.BatchNormalization(),
         keras.layers.Dropout(0.2),
 
@@ -142,15 +138,15 @@ def deep_learning_prediction(pipeline):
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss",
-            factor=0.8,          # reduce_lr_factor
-            patience=5,          # reduce_lr_patience
+            factor=0.8,
+            patience=5,
             verbose=1,
-            min_lr=1e-7          # reduce_lr_min
+            min_lr=1e-7
         ),
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=10,         # early_stopping_patience
-            min_delta=0.001,     # early_stopping_min_delta
+            patience=10,
+            min_delta=0.001,
             restore_best_weights=True,
             verbose=1
         ),
@@ -162,9 +158,9 @@ def deep_learning_prediction(pipeline):
         augmented_features,
         augmented_labels,
         epochs=dynamic_epochs,
-        batch_size=32,        # batch_size
+        batch_size=32,
         verbose=1,
-        validation_split=0.15,  # validation_split
+        validation_split=0.15,
         callbacks=callbacks
     )
 
@@ -174,6 +170,7 @@ def deep_learning_prediction(pipeline):
 
     # Step 14: Store results
     pipeline.add_data("deep_learning_predictions", final_prediction)
+
 
 
 

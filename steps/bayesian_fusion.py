@@ -1,10 +1,10 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: Mechanics Estimation + Bayesian Fusion
 ## Description:
 ## - Estimate small, data-driven mechanics biases (Dirichlet posterior on observed counts).
 ## - Run a quick chi-square goodness-of-fit to decide if the mechanics signal is meaningful.
-## - Multiply frequency * decay * mechanics (data-driven, multiplicative fusion).
+## - Combine frequency, decay, mechanics using log-space fusion (avoids overweighting).
 ## - Normalize posterior to sum to 1 (probability distribution).
 ## - Also provide max-normalized version for deep learning feature stacking.
 ## - No injected bias. If mechanics signal is not significant, collapse mechanics -> uniform.
@@ -60,17 +60,14 @@ def _estimate_mechanics_dirichlet_from_history(historical_data, alpha=1.0):
 
 
 def bayesian_fusion_with_mechanics(pipeline, alpha=1.0, chi2_threshold=_CHI2_CRIT_DF39_0P05,
-                                   use_mechanics_if_significant=True, verbose=False):
+                                   use_mechanics_if_significant=True, verbose=False,
+                                   weights=(1.0, 1.0, 1.0)):
     """
     Combine frequency, decay, and mechanics estimate into a normalized posterior (shape 40).
+    Fusion is done in log-space to avoid overweighting any single component.
     - frequency: pipeline["number_frequency"] (shape 40, sums to 1 expected)
     - decay: pipeline["decay_factors"]["numbers"] (shape 40, sums to 1 expected)
-    Steps:
-      1) Estimate mechanics_vector from pipeline["historical_data"] using Dirichlet posterior.
-      2) If chi2 test says mechanics ~ uniform (not significant), collapse mechanics_vector -> uniform.
-      3) posterior_raw = frequency * decay * mechanics_vector
-      4) posterior (sums to 1) = probability distribution
-      5) posterior_norm (scaled [0,1]) = deep learning feature
+    - mechanics: estimated from historical data, collapsed to uniform if chi2 not significant
     """
     # Defensive retrieval
     freq = pipeline.get_data("number_frequency")
@@ -108,8 +105,15 @@ def bayesian_fusion_with_mechanics(pipeline, alpha=1.0, chi2_threshold=_CHI2_CRI
     decay = np.clip(decay, 0.0, None)
     mechanics_used = np.clip(mechanics_used, 0.0, None)
 
-    # Fusion
-    posterior = freq * decay * mechanics_used
+    # --- Log-space fusion ---
+    w_f, w_d, w_m = weights
+    eps = 1e-12
+    log_posterior = (
+        w_f * np.log(freq + eps) +
+        w_d * np.log(decay + eps) +
+        w_m * np.log(mechanics_used + eps)
+    )
+    posterior = np.exp(log_posterior)
 
     # Normalize to sum=1
     total = posterior.sum()
@@ -132,4 +136,5 @@ def bayesian_fusion_with_mechanics(pipeline, alpha=1.0, chi2_threshold=_CHI2_CRI
     logging.info(f"Bayesian fusion stored successfully.")
 
     return posterior
+
 

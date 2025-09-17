@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: To Analyze and Normalize Lottery Number Frequencies
 ## Description:
 ## This file calculates the frequency of each lottery number (1 to 40) from historical draw data. 

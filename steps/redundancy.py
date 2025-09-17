@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: Generate Sequential / Temporal Features for Lottery Numbers
 ## Description:
 ## This file analyzes historical lottery draw sequences to extract features based on transitions,

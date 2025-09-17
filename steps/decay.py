@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: To Calculate Decay-Weighted Lottery Number Frequencies
 ## Description:
 ## This file applies a decay factor to historical lottery draw data, assigning more weight to recent draws

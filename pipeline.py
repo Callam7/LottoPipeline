@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: Core Data Pipeline and Dynamic Parameter Management
 ## Description:
 ## This file defines the `DataPipeline` class, which acts as a shared container for

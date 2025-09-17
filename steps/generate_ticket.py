@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: Ticket Generation from Deep Learning Predictions
 ## Description:
 ## This file generates a complete set of lottery ticket lines using only the final

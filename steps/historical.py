@@ -1,5 +1,5 @@
-## Modified By: Callam Josef Jackson-Sem
-## Project: Lotto Predictor
+## Modified By: Callam
+## Project: Lotto Generator
 ## Purpose of File: To Process Historical Lottery Draw Data
 ## Description:
 ## This file handles the first step of the pipeline: processing historical lottery draw data.

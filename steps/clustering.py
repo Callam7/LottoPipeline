@@ -1,5 +1,5 @@
 ## Modified By: Callam  
-## Project: Lotto Predictor  
+## Project: Lotto Generator  
 ## Purpose of File: Perform K-Means Clustering on Number Frequencies with Bayesian Fusion  
 ## Description:  
 ## This file applies K-Means clustering to identify patterns or groupings in the frequency data   

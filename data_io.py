@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: Manage Input/Output for Generated Ticket Data
 ## Description:
 ## This file provides functions to handle the saving and loading of generated lottery ticket data

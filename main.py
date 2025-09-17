@@ -1,5 +1,5 @@
 ## Modified By: Callam
-## Project: Lotto Predictor
+## Project: Lotto Generator
 ## Purpose of File: Main Program Execution
 ## Description:
 ## This file serves as the entry point for the Lotto Predictor program.
