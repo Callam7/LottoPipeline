@@ -2,96 +2,75 @@
 ## Project: Lotto Generator
 ## Purpose of File: Core Data Pipeline and Dynamic Parameter Management
 ## Description:
-## This file defines the `DataPipeline` class, which acts as a shared container for
-## data passed between different steps of the pipeline. It includes methods for adding,
-## retrieving, and clearing data. Additionally, it includes dynamic parameter calculations
-## for simulations and epochs, as well as ticket generation and hit rate analysis.
+##   Manages shared pipeline data, dynamic parameters, ticket generation, and hit rate analysis.
+##   Integrates new Bayesian fusion, Monte Carlo, clustering, redundancy, Markov, and entropy features.
 
-import os  # For environmental configurations
-import logging  # For logging pipeline operations
-from typing import Any, Dict, Tuple, List  # For type hinting and clarity
-from itertools import combinations  # For generating unique number combinations
-import numpy as np  # For numerical computations
+import os
+import logging
+from typing import Any, Dict, Tuple, List
+import numpy as np
 
-# Configure logging for this module
+# ====== Configuration Constants ======
+NUM_MAIN_NUMBERS = 40
+NUM_POWERBALL = 10
+NUM_TOTAL_NUMBERS = NUM_MAIN_NUMBERS + NUM_POWERBALL
+TICKET_LINES = 12
+LINE_SIZE = 6
+MIN_PROB = 1e-12
+
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# Suppress TensorFlow logging to reduce console clutter
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress INFO and WARNING logs from TensorFlow
 
+# ============================================================
+# Dynamic Parameter Management
+# ============================================================
 def get_dynamic_params(num_draws: int) -> Tuple[int, int]:
-    """
-    Determines dynamic parameters based on the number of historical draws.
-
-    Parameters:
-    - num_draws (int): The number of historical lottery draws.
-
-    Returns:
-    - Tuple[int, int]: A tuple containing:
-        - Monte Carlo simulations count (int): Calculated as min(num_draws * 50, 100,000).
-        - Epochs for training (int): Calculated as min(50 + (num_draws // 100), 100).
-    """
+    """Dynamic Monte Carlo sims and DL epochs based on historical draws."""
     mc_sims = min(num_draws * 50, 100_000)
-    base_epochs = 50
-    dynamic_epochs = min(base_epochs + (num_draws // 100), 100)
-    logging.debug(f"Dynamic parameters based on {num_draws} draws: mc_sims={mc_sims}, dynamic_epochs={dynamic_epochs}")
+    dynamic_epochs = min(50 + (num_draws // 100), 100)
+    logging.debug(f"Dynamic params: mc_sims={mc_sims}, dynamic_epochs={dynamic_epochs}")
     return mc_sims, dynamic_epochs
 
+
+# ============================================================
+# Core Pipeline Class
+# ============================================================
 class DataPipeline:
-    """
-    A container for pipeline data.
-    Each step can add/retrieve data by key and share it across the pipeline.
-    """
+    """Shared container for all pipeline data."""
+
     def __init__(self) -> None:
         self.data: Dict[str, Any] = {}
-        logging.info("Initialized a new DataPipeline instance.")
+        logging.info("Initialized DataPipeline.")
 
     def add_data(self, key: str, value: Any) -> None:
-        """
-        Adds data to the pipeline with the specified key.
-
-        Parameters:
-        - key (str): The key under which the data will be stored.
-        - value (Any): The data to store.
-        """
+        """Add or update a value in the pipeline."""
+        if key is None:
+            raise ValueError("Pipeline key cannot be None.")
         self.data[key] = value
         logging.debug(f"Added data under key '{key}'.")
 
     def get_data(self, key: str) -> Any:
-        """
-        Retrieves data from the pipeline by key.
-
-        Parameters:
-        - key (str): The key of the data to retrieve.
-
-        Returns:
-        - Any: The data associated with the key, or None if the key does not exist.
-        """
-        data = self.data.get(key)
-        if data is not None:
-            logging.debug(f"Retrieved data from key '{key}'.")
+        """Retrieve value from the pipeline by key."""
+        value = self.data.get(key)
+        if value is not None:
+            logging.debug(f"Retrieved data for key '{key}'.")
         else:
             logging.debug(f"No data found for key '{key}'.")
-        return data
+        return value
 
     def clear_pipeline(self) -> None:
-        """
-        Clears all data from the pipeline.
-        """
+        """Clear all stored data from the pipeline."""
         self.data.clear()
-        logging.info("Cleared all data from the pipeline.")
+        logging.info("Pipeline cleared.")
 
+
+# ============================================================
+# Hit Rate Analysis
+# ============================================================
 def hit_rate_analysis(tickets: List[Dict[str, Any]], historical_data: List[Dict[str, Any]]) -> Tuple[int, Dict[int, int]]:
-    """
-    Analyzes the performance of generated tickets against historical data.
-
-    Parameters:
-    - tickets (List[Dict[str, Any]]): List of generated tickets.
-    - historical_data (List[Dict[str, Any]]): List of historical lottery draws.
-
-    Returns:
-    - Tuple[int, Dict[int, int]]: Exact matches and partial matches (4/6, 5/6, etc.).
-    """
+    """Analyze ticket performance versus historical draws."""
     exact_matches = 0
     partial_matches = {4: 0, 5: 0, 6: 0}
 
@@ -105,68 +84,95 @@ def hit_rate_analysis(tickets: List[Dict[str, Any]], historical_data: List[Dict[
 
     return exact_matches, partial_matches
 
+
+# ============================================================
+# Ticket Generation (Final Step)
+# ============================================================
 def generate_ticket(pipeline: DataPipeline, penalty_factor: float = 1.5) -> List[Dict[str, Any]]:
     """
-    Combines deep learning predictions and decay factors to generate lottery tickets.
-    Utilizes a penalty-based diversity approach to ensure varied ticket lines.
-
-    Parameters:
-    - pipeline (DataPipeline): The pipeline object containing shared data across steps.
-    - penalty_factor (float): The factor by which to penalize frequently selected numbers.
-
-    Returns:
-    - List[Dict[str, Any]]: A list of ticket lines, each containing main numbers and a Powerball number.
+    Generate ticket lines using deep learning predictions and Bayesian fusion.
+    Combines model predictions with Bayesian fusion weighting and diversity penalties.
     """
-    decay_factors = pipeline.get_data("decay_factors")
+
     predictions = pipeline.get_data("deep_learning_predictions")
+    fusion = pipeline.get_data("bayesian_fusion")
     historical_data = pipeline.get_data("historical_data")
 
-    if decay_factors is None or predictions is None:
-        logging.error("Decay factors or deep learning predictions are missing in the pipeline.")
-        return []
+    # Split predictions safely
+    if predictions is not None:
+        predictions = np.array(predictions, dtype=float)
+        if len(predictions) == NUM_TOTAL_NUMBERS:
+            predictions_main = predictions[:NUM_MAIN_NUMBERS]
+            predictions_powerball = predictions[NUM_MAIN_NUMBERS:]
+        elif len(predictions) == NUM_MAIN_NUMBERS:
+            predictions_main = predictions
+            predictions_powerball = np.ones(NUM_POWERBALL) / NUM_POWERBALL
+        else:
+            logging.warning(f"Unexpected deep learning prediction length ({len(predictions)}). Using uniform fallback.")
+            predictions_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
+            predictions_powerball = np.ones(NUM_POWERBALL) / NUM_POWERBALL
+    else:
+        logging.warning("Missing deep learning predictions; using uniform fallback.")
+        predictions_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
+        predictions_powerball = np.ones(NUM_POWERBALL) / NUM_POWERBALL
 
-    if historical_data is None:
-        logging.error("Historical data is missing in the pipeline.")
-        return []
+    # Split fusion safely
+    if fusion is not None:
+        fusion = np.array(fusion, dtype=float)
+        if len(fusion) == NUM_TOTAL_NUMBERS:
+            fusion_main = fusion[:NUM_MAIN_NUMBERS]
+            fusion_powerball = fusion[NUM_MAIN_NUMBERS:]
+        elif len(fusion) == NUM_MAIN_NUMBERS:
+            fusion_main = fusion
+            fusion_powerball = np.ones(NUM_POWERBALL) / NUM_POWERBALL
+        else:
+            logging.warning(f"Unexpected Bayesian fusion length ({len(fusion)}). Using uniform fallback.")
+            fusion_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
+            fusion_powerball = np.ones(NUM_POWERBALL) / NUM_POWERBALL
+    else:
+        logging.warning("Missing Bayesian fusion; using uniform fallback.")
+        fusion_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
+        fusion_powerball = np.ones(NUM_POWERBALL) / NUM_POWERBALL
 
-    num_draws = len(historical_data)
-    mc_sims, dynamic_epochs = get_dynamic_params(num_draws)
-    logging.debug(f"Using {mc_sims} Monte Carlo simulations and {dynamic_epochs} training epochs.")
-
-    # Weighted combination of deep learning predictions and decay factors
-    alpha = min(1.0, 0.5 + (num_draws / 10000))  # Example dynamic adjustment
-    numbers_prob = alpha * predictions + (1 - alpha) * decay_factors["numbers"]
-    numbers_prob = np.clip(numbers_prob, 1e-10, None)
-    numbers_prob /= numbers_prob.sum()
-
-    # Powerball probabilities remain based on decay factors
-    powerball_prob = decay_factors["powerball"] / decay_factors["powerball"].sum()
-    powerball_prob = np.clip(powerball_prob, 1e-10, None)
-    powerball_prob /= powerball_prob.sum()
-
-    # Generate ticket lines with penalties for diversity
     ticket: List[Dict[str, Any]] = []
-    frequency_penalty = np.zeros(40)
+    frequency_penalty = np.zeros(NUM_MAIN_NUMBERS)
     logging.info("Starting ticket generation process.")
 
-    for _ in range(12):
-        adjusted_prob = numbers_prob - penalty_factor * (frequency_penalty / (frequency_penalty.sum() + 1))
-        adjusted_prob = np.clip(adjusted_prob, 1e-10, None)
-        adjusted_prob /= adjusted_prob.sum()
+    for _ in range(TICKET_LINES):
+        # --- MAIN NUMBERS ---
+        numbers_prob = fusion_main * predictions_main
+        numbers_prob = np.clip(numbers_prob, MIN_PROB, None)
+        numbers_prob /= numbers_prob.sum()
 
-        # Generate main numbers
-        main_numbers = sorted(
-            np.random.choice(np.arange(1, 41), size=6, replace=False, p=adjusted_prob)
+        # Apply diversity penalty
+        numbers_prob = np.clip(
+            numbers_prob - penalty_factor * (frequency_penalty / (frequency_penalty.sum() + 1)),
+            MIN_PROB,
+            None
         )
+        numbers_prob /= numbers_prob.sum()
 
-        # Update penalties for selected numbers
-        for num in main_numbers:
-            frequency_penalty[num - 1] += 1
+        main_numbers = sorted(np.random.choice(
+            np.arange(1, NUM_MAIN_NUMBERS + 1),
+            LINE_SIZE,
+            replace=False,
+            p=numbers_prob
+        ))
 
-        # Generate Powerball number
-        powerball = np.random.choice(np.arange(1, 11), p=powerball_prob)
+        for n in main_numbers:
+            frequency_penalty[n - 1] += 1
+
+        # --- POWERBALL ---
+        powerball_prob = fusion_powerball * predictions_powerball
+        powerball_prob = np.clip(powerball_prob, MIN_PROB, None)
+        powerball_prob /= powerball_prob.sum()
+
+        powerball = np.random.choice(np.arange(1, NUM_POWERBALL + 1), p=powerball_prob)
+
         ticket.append({"line": main_numbers, "powerball": powerball})
 
     logging.info("Ticket generation completed successfully.")
+    pipeline.add_data("generated_tickets", ticket)
     return ticket
+
 

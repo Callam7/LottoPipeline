@@ -1,92 +1,92 @@
 ﻿## Modified By: Callam
 ## Project: Lotto Generator
-## Purpose of File: Deep Learning Prediction for Lottery Numbers
+## Purpose of File: Deep Learning Prediction for Lottery Numbers (Shape 50)
 ## Description:
-## This file utilizes a deep learning model to predict probabilities for the 40 main lottery numbers
-## as well as the powerball range between 1-10. The model leverages historical data,
-## Monte Carlo results, clustering information, redundancy (recency/gap) data, Markov transition
-## probabilities, entropy, and Bayesian fusion. The predictions are normalized to produce a probability
-## distribution, which is used in ticket generation.
+##    Predict probabilities for 40 main numbers + 10 Powerball numbers using historical,
+##    Monte Carlo, clustering, redundancy, Markov, entropy, and Bayesian fusion features.
+##    Features are concatenated into shape 50 for deep learning input.
 
 import numpy as np
-import tensorflow as tf  # type: ignore
-from tensorflow import keras  # type: ignore
+import tensorflow as tf
+from tensorflow import keras
 from pipeline import get_dynamic_params
 from config.logs import EpochLogger
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- Constants ---
+NUM_MAIN = 40
+NUM_POWERBALL = 10
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL
+LABEL_SMOOTH = 0.95
+DATA_AUGMENTATION_ROUNDS = 100
+NOISE_STDDEV = 0.05
+BATCH_SIZE = 32
+MIN_CLASS_WEIGHT = 1.0
+MAX_CLASS_WEIGHT = 10.0
+MIN_PROB = 1e-12
 
 def deep_learning_prediction(pipeline):
     """
-    Utilizes a deep learning model to predict the independent probability of each of the 40 lottery numbers
-    being drawn, using sigmoid outputs and binary crossentropy loss to handle multi-label classification.
-
-    Parameters:
-    - pipeline (DataPipeline): The pipeline object containing shared data across steps.
-
-    Returns:
-    - None: Adds "deep_learning_predictions" to the pipeline.
+    Predicts probability distribution over 50 numbers (40 main + 10 Powerball).
+    Features are concatenated into shape 50 for input.
     """
-
-    # Step 1: Retrieve necessary data
+    # Step 1: Retrieve features
     historical_data = pipeline.get_data("historical_data")
     if not historical_data:
-        print("No historical data available for deep learning prediction.")
-        pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
+        logging.warning("No historical data available for deep learning prediction.")
+        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
     monte_carlo = pipeline.get_data("monte_carlo")
+    redundancy = pipeline.get_data("redundancy")
+    markov = pipeline.get_data("markov_features")
+    entropy = pipeline.get_data("entropy_features")
+    fusion_norm = pipeline.get_data("bayesian_fusion_norm")
     clusters = pipeline.get_data("clusters")
     centroids = pipeline.get_data("centroids")
-    redundancy = pipeline.get_data("redundancy")      # Recency/gap data
-    markov = pipeline.get_data("markov_features")     # Markov transition probabilities
-    entropy = pipeline.get_data("entropy_features")   # Entropy features
-    fusion_norm = pipeline.get_data("bayesian_fusion_norm")  # Bayesian fusion (normalized for DL)
 
-    if any(v is None for v in [monte_carlo, clusters, centroids,
-                               redundancy, markov, entropy, fusion_norm]):
-        print("Necessary data missing for deep learning prediction.")
-        pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
+    required_features = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
+    if any(v is None for v in required_features):
+        logging.warning("Missing required features. Falling back to uniform distribution.")
+        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
-    # Step 2: Normalize inputs
-    mc_max = max(monte_carlo.max(), 1e-12)
-    red_max = max(redundancy.max(), 1e-12)
-    mk_max = max(markov.max(), 1e-12)
-    ent_max = max(entropy.max(), 1e-12)
-    fu_max = max(fusion_norm.max(), 1e-12)
+    # Step 2: Normalize each feature
+    monte_carlo_norm = monte_carlo / max(np.max(monte_carlo), MIN_PROB)
+    redundancy_norm = redundancy / max(np.max(redundancy), MIN_PROB)
+    markov_norm = markov / max(np.max(markov), MIN_PROB)
+    entropy_norm = entropy / max(np.max(entropy), MIN_PROB)
+    fusion_norm = fusion_norm / max(np.max(fusion_norm), MIN_PROB)
 
-    monte_carlo_norm = monte_carlo / mc_max
-    redundancy_norm = redundancy / red_max
-    markov_norm = markov / mk_max
-    entropy_norm = entropy / ent_max
-    fusion_norm = fusion_norm / fu_max   # re-safeguard to [0,1]
-
-    # Step 3: Assemble feature set (decay removed)
+    # Step 3: Concatenate features for model input
     features = np.column_stack((
         monte_carlo_norm,
         redundancy_norm,
         markov_norm,
         entropy_norm,
-        fusion_norm,            # Bayesian Fusion
-        centroids[clusters]
+        fusion_norm,
+        centroids[clusters]  # cluster centroid values
     ))
 
-    # Step 4: Create binary labels from historical draw data (with label smoothing)
+    # Step 4: Generate binary labels with label smoothing
     labels = []
     for draw in historical_data:
-        binary_label = np.zeros(40)
-        for num in draw["numbers"]:
-            if 1 <= num <= 40:
-                binary_label[num - 1] = 0.95  # label smoothing
+        binary_label = np.zeros(NUM_TOTAL)
+        for num in draw.get("numbers", []):
+            if 1 <= num <= NUM_TOTAL:
+                binary_label[num - 1] = LABEL_SMOOTH
         labels.append(binary_label)
     labels = np.array(labels)
 
-    # Step 5: Compute class weights
+    # Step 5: Class weights
     pos_counts = labels.sum(axis=0)
     neg_counts = len(labels) - pos_counts
-    class_weights = neg_counts / (pos_counts + 1e-6)
-    class_weights = np.clip(class_weights, 1.0, 10.0)
+    class_weights = neg_counts / (pos_counts + MIN_PROB)
+    class_weights = np.clip(class_weights, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT)
 
-    # Step 6: Weighted binary crossentropy
+    # Step 6: Weighted BCE loss
     def weighted_binary_crossentropy(weights):
         def loss_fn(y_true, y_pred):
             bce = keras.backend.binary_crossentropy(y_true, y_pred)
@@ -97,11 +97,10 @@ def deep_learning_prediction(pipeline):
     # Step 7: Data augmentation
     augmented_features = []
     augmented_labels = []
-    for _ in range(100):
-        noise = np.random.normal(0, 0.05, features.shape)
+    for _ in range(DATA_AUGMENTATION_ROUNDS):
+        noise = np.random.normal(0, NOISE_STDDEV, features.shape)
         augmented_features.append(features + noise)
         augmented_labels.extend(labels)
-
     augmented_features = np.vstack(augmented_features)
     augmented_labels = np.vstack(augmented_labels)
 
@@ -109,21 +108,19 @@ def deep_learning_prediction(pipeline):
     num_draws = len(historical_data)
     mc_sims, dynamic_epochs = get_dynamic_params(num_draws)
 
-    # Step 9: Define model architecture
+    # Step 9: Model architecture
     model = keras.Sequential([
         keras.layers.Input(shape=(features.shape[1],)),
         keras.layers.Dense(128, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
         keras.layers.BatchNormalization(),
         keras.layers.Dropout(0.2),
-
         keras.layers.Dense(64, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
         keras.layers.BatchNormalization(),
         keras.layers.Dropout(0.2),
-
-        keras.layers.Dense(40, activation="sigmoid")
+        keras.layers.Dense(NUM_TOTAL, activation="sigmoid")
     ])
 
-    # Step 10: Compile model
+    # Step 10: Compile
     model.compile(
         optimizer=keras.optimizers.Adam(),
         loss=weighted_binary_crossentropy(tf.constant(class_weights, dtype=tf.float32)),
@@ -137,39 +134,33 @@ def deep_learning_prediction(pipeline):
     # Step 11: Callbacks
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=0.8,
-            patience=5,
-            verbose=1,
-            min_lr=1e-7
+            monitor="val_loss", factor=0.8, patience=5, verbose=1, min_lr=1e-7
         ),
         keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=10,
-            min_delta=0.001,
-            restore_best_weights=True,
-            verbose=1
+            monitor="val_loss", patience=10, min_delta=0.001, restore_best_weights=True, verbose=1
         ),
         EpochLogger()
     ]
 
-    # Step 12: Train model
-    history = model.fit(
+    # Step 12: Train
+    model.fit(
         augmented_features,
         augmented_labels,
         epochs=dynamic_epochs,
-        batch_size=32,
+        batch_size=BATCH_SIZE,
         verbose=1,
         validation_split=0.15,
         callbacks=callbacks
     )
 
-    # Step 13: Predict and average
+    # Step 13: Predict
     predictions = model.predict(features)
     final_prediction = np.mean(predictions, axis=0)
 
-    # Step 14: Store results
+    # Step 14: Store result
     pipeline.add_data("deep_learning_predictions", final_prediction)
+    logging.info("Deep learning predictions generated successfully.")
+
 
 
 
