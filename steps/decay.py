@@ -1,4 +1,4 @@
-## Modified By: Callam
+﻿## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose of File: To Calculate Decay-Weighted Lottery Number Frequencies
 ## Description:

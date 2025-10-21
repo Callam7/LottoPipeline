@@ -1,9 +1,9 @@
-## Modified By: Callam  
+ï»¿## Modified By: Callam  
 ## Project: Lotto Generator  
 ## Purpose of File: Perform K-Means Clustering on Number Frequencies with Bayesian Fusion  
 ## Description:  
 ## This file applies K-Means clustering to identify patterns or groupings in the frequency data   
-## of both main lottery numbers (1–40) and Powerball numbers (1–10), incorporating Bayesian fusion  
+## of both main lottery numbers (1â€“40) and Powerball numbers (1â€“10), incorporating Bayesian fusion  
 ## for both datasets. Clustering results, including labels and centroids, are stored in the pipeline  
 ## for use in subsequent predictive modeling steps.  
 

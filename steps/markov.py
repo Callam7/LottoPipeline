@@ -1,4 +1,4 @@
-## Modified By: Callam
+﻿## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose of File: Generate Markov Transition Features from Clustered Historical Data
 ## Description:

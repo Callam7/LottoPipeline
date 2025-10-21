@@ -1,4 +1,4 @@
-## Modified By: Callam
+﻿## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose of File: To Analyze and Normalize Lottery Number Frequencies
 ## Description:
@@ -74,4 +74,5 @@ def analyze_number_frequency(pipeline: Any) -> None:
     
     # Step 5: Store the normalized frequency distribution in the pipeline
     pipeline.add_data("number_frequency", numbers_frequency)
+
 
