@@ -105,3 +105,4 @@ def analyze_number_frequency(pipeline: Any) -> None:
 
     logging.info("Number frequency analysis completed.")
 
+
