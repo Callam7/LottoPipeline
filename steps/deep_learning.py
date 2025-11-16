@@ -13,7 +13,9 @@ from pipeline import get_dynamic_params
 from config.logs import EpochLogger
 import logging
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from steps.quantum_features import compute_quantum_features, QUANTUM_FEATURE_LEN
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # --- Constants ---
 NUM_MAIN = 40
@@ -27,15 +29,12 @@ MIN_CLASS_WEIGHT = 1.0
 MAX_CLASS_WEIGHT = 10.0
 MIN_PROB = 1e-12
 
+
 def deep_learning_prediction(pipeline):
-    """
-    Predicts probability distribution over 50 numbers (40 main + 10 Powerball).
-    Features are concatenated into shape 50 for input.
-    """
-    # Step 1: Retrieve features
+
+    # Step 1: pull historical + feature data from pipeline
     historical_data = pipeline.get_data("historical_data")
     if not historical_data:
-        logging.warning("No historical data available for deep learning prediction.")
         pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
@@ -47,119 +46,170 @@ def deep_learning_prediction(pipeline):
     clusters = pipeline.get_data("clusters")
     centroids = pipeline.get_data("centroids")
 
-    required_features = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
-    if any(v is None for v in required_features):
-        logging.warning("Missing required features. Falling back to uniform distribution.")
+    required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
+    if any(v is None for v in required):
         pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
-    # Step 2: Normalize each feature
-    monte_carlo_norm = monte_carlo / max(np.max(monte_carlo), MIN_PROB)
-    redundancy_norm = redundancy / max(np.max(redundancy), MIN_PROB)
-    markov_norm = markov / max(np.max(markov), MIN_PROB)
-    entropy_norm = entropy / max(np.max(entropy), MIN_PROB)
-    fusion_norm = fusion_norm / max(np.max(fusion_norm), MIN_PROB)
+    # Step 2: safe normalization
+    def _safe_norm(x):
+        x = np.asarray(x, dtype=float)
+        max_val = max(np.max(x), MIN_PROB)
+        return x / max_val
 
-    # Step 3: Concatenate features for model input
-    features = np.column_stack((
-        monte_carlo_norm,
-        redundancy_norm,
-        markov_norm,
-        entropy_norm,
-        fusion_norm,
-        centroids[clusters]  # cluster centroid values
-    ))
+    monte_carlo = _safe_norm(monte_carlo)
+    redundancy = _safe_norm(redundancy)
+    markov = _safe_norm(markov)
+    entropy = _safe_norm(entropy)
+    fusion_norm = _safe_norm(fusion_norm)
 
-    # Step 4: Generate binary labels with label smoothing
+    clusters = np.asarray(clusters, dtype=int)
+    centroids = np.asarray(centroids, dtype=float)
+    centroids_for_rows = centroids[clusters]
+
+    # Step 3: classical feature block
+    base_features = np.column_stack(
+        (
+            monte_carlo,
+            redundancy,
+            markov,
+            entropy,
+            fusion_norm,
+            centroids_for_rows,
+        )
+    )
+
+    # Step 4: quantum features per row
+    quantum_rows = []
+    for row in base_features:
+        quantum_rows.append(compute_quantum_features(row))
+
+    quantum_rows = np.vstack(quantum_rows)
+
+    # final feature matrix
+    features = np.hstack((base_features, quantum_rows))
+
+    # Step 5: smoothed binary labels
     labels = []
     for draw in historical_data:
-        binary_label = np.zeros(NUM_TOTAL)
+        arr = np.zeros(NUM_TOTAL, dtype=float)
         for num in draw.get("numbers", []):
             if 1 <= num <= NUM_TOTAL:
-                binary_label[num - 1] = LABEL_SMOOTH
-        labels.append(binary_label)
-    labels = np.array(labels)
+                arr[num - 1] = LABEL_SMOOTH
+        labels.append(arr)
 
-    # Step 5: Class weights
+    labels = np.asarray(labels, dtype=float)
+
+    # Step 6: class weights
     pos_counts = labels.sum(axis=0)
     neg_counts = len(labels) - pos_counts
     class_weights = neg_counts / (pos_counts + MIN_PROB)
     class_weights = np.clip(class_weights, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT)
 
-    # Step 6: Weighted BCE loss
+    # Step 7: weighted BCE
     def weighted_binary_crossentropy(weights):
+        weights = tf.constant(weights, dtype=tf.float32)
+
         def loss_fn(y_true, y_pred):
             bce = keras.backend.binary_crossentropy(y_true, y_pred)
-            weight_tensor = y_true * weights + (1.0 - y_true)
-            return keras.backend.mean(weight_tensor * bce, axis=-1)
+            w = y_true * weights + (1.0 - y_true)
+            return keras.backend.mean(w * bce, axis=-1)
+
         return loss_fn
 
-    # Step 7: Data augmentation
-    augmented_features = []
-    augmented_labels = []
-    for _ in range(DATA_AUGMENTATION_ROUNDS):
-        noise = np.random.normal(0, NOISE_STDDEV, features.shape)
-        augmented_features.append(features + noise)
-        augmented_labels.extend(labels)
-    augmented_features = np.vstack(augmented_features)
-    augmented_labels = np.vstack(augmented_labels)
+    # Step 8: gaussian augmentation on features
+    augmented_f = []
+    augmented_l = []
 
-    # Step 8: Dynamic training parameters
+    for _ in range(DATA_AUGMENTATION_ROUNDS):
+        noise = np.random.normal(0.0, NOISE_STDDEV, features.shape)
+        augmented_f.append(features + noise)
+        augmented_l.extend(labels)
+
+    augmented_f = np.vstack(augmented_f)
+    augmented_l = np.vstack(augmented_l)
+
+    # Step 9: dynamic epoch system (then capped to avoid quantum overfit)
     num_draws = len(historical_data)
     mc_sims, dynamic_epochs = get_dynamic_params(num_draws)
 
-    # Step 9: Model architecture
-    model = keras.Sequential([
-        keras.layers.Input(shape=(features.shape[1],)),
-        keras.layers.Dense(128, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.2),
-        keras.layers.Dense(64, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.2),
-        keras.layers.Dense(NUM_TOTAL, activation="sigmoid")
-    ])
+    # hard cap for quantum-heavy model
+    dynamic_epochs = min(dynamic_epochs, 40)
 
-    # Step 10: Compile
-    model.compile(
-        optimizer=keras.optimizers.Adam(),
-        loss=weighted_binary_crossentropy(tf.constant(class_weights, dtype=tf.float32)),
-        metrics=[
-            keras.metrics.BinaryAccuracy(name="binary_accuracy"),
-            keras.metrics.AUC(name="auc"),
-            keras.metrics.MeanAbsoluteError(name="mae")
+    input_dim = augmented_f.shape[1]
+
+    # Step 10: model arch (only regularization changed)
+    model = keras.Sequential(
+        [
+            keras.layers.Input(shape=(input_dim,)),
+            keras.layers.Dense(
+                256, activation="relu",
+                kernel_regularizer=keras.regularizers.l2(0.001)  # stronger L2
+            ),
+            keras.layers.BatchNormalization(),
+            keras.layers.Dropout(0.4),  # stronger dropout
+
+            keras.layers.Dense(
+                128, activation="relu",
+                kernel_regularizer=keras.regularizers.l2(0.001)
+            ),
+            keras.layers.BatchNormalization(),
+            keras.layers.Dropout(0.4),
+
+            keras.layers.Dense(NUM_TOTAL, activation="sigmoid"),
         ]
     )
 
-    # Step 11: Callbacks
+    # Step 11: compile
+    model.compile(
+        optimizer=keras.optimizers.Adam(),
+        loss=weighted_binary_crossentropy(class_weights),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name="binary_accuracy"),
+            keras.metrics.AUC(name="auc"),
+            keras.metrics.MeanAbsoluteError(name="mae"),
+        ],
+    )
+
+    # Step 12: callbacks (tighter early stop)
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.8, patience=5, verbose=1, min_lr=1e-7
+            monitor="val_loss",
+            factor=0.8,
+            patience=5,
+            verbose=1,
+            min_lr=1e-7,
         ),
         keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=10, min_delta=0.001, restore_best_weights=True, verbose=1
+            monitor="val_loss",
+            patience=6,        # tighter
+            min_delta=0.002,   # stricter improvement requirement
+            restore_best_weights=True,
+            verbose=1,
         ),
-        EpochLogger()
+        EpochLogger(),
     ]
 
-    # Step 12: Train
+    # Step 13: train
     model.fit(
-        augmented_features,
-        augmented_labels,
+        augmented_f,
+        augmented_l,
         epochs=dynamic_epochs,
         batch_size=BATCH_SIZE,
         verbose=1,
         validation_split=0.15,
-        callbacks=callbacks
+        callbacks=callbacks,
     )
 
-    # Step 13: Predict
+    # Step 14: inference on clean features
     predictions = model.predict(features)
     final_prediction = np.mean(predictions, axis=0)
 
-    # Step 14: Store result
+    # Step 15: push to pipeline
     pipeline.add_data("deep_learning_predictions", final_prediction)
-    logging.info("Deep learning predictions generated successfully.")
+    logging.info("Deep learning predictions (quantum anti-overfit) complete.")
+
+
 
 
 

@@ -1,4 +1,4 @@
-## Modified By: Callam
+﻿## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose of File: Main Program Execution (Updated for Correct Pipeline Order)
 ## Description:
