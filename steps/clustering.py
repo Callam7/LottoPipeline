@@ -1,109 +1,120 @@
 ﻿## Modified By: Callam  
 ## Project: Lotto Generator  
-## Purpose of File: Perform K-Means Clustering on Number Frequencies with Bayesian Fusion  
+## Purpose of File: Perform K-Means Clustering on Bayesian Fusion Probabilities  
 ## Description:  
+<<<<<<< HEAD
+## Clusters both main (1–40) and Powerball (1–10) Bayesian fusion probabilities.  
+## Produces unified cluster labels and centroid influence vectors of shape (50,).  
+## Each section is scaled within its domain, then concatenated to preserve probabilistic structure.
+=======
 ## This file applies K-Means clustering to identify patterns or groupings in the frequency data   
 ## of both main lottery numbers (1–40) and Powerball numbers (1–10), incorporating Bayesian fusion  
 ## for both datasets. Clustering results, including labels and centroids, are stored in the pipeline  
 ## for use in subsequent predictive modeling steps.  
+>>>>>>> 2c8488b95f520be890fa7fd7753dabbafbfe5127
 
-import numpy as np  
-from sklearn.cluster import KMeans  
-from sklearn.preprocessing import MinMaxScaler  
-import logging  
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import MinMaxScaler
+import logging
 
-# Configure logging  
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')  
+# Constants
+NUM_MAIN = 40
+NUM_POWERBALL = 10
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL
 
-def kmeans_clustering_and_correlation(pipeline, n_clusters=5):
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+def kmeans_clustering_and_correlation(pipeline, n_clusters_main=5, n_clusters_powerball=3):
     """
-    Performs K-Means clustering on main number frequency data combined with Bayesian fusion.
-    Fusion is mandatory. Maintains 40-number array shape.
+    Perform K-Means clustering on Bayesian fusion data (main + Powerball).
+
+    Adds to pipeline:
+        - clusters (np.ndarray, shape=(50,), dtype=int)
+        - centroids (np.ndarray, shape=(50,), dtype=float)
+        - number_to_cluster (np.ndarray, shape=(50,), dtype=int)
     """
-    # Step 1: Retrieve frequency and fusion data
-    frequency_data = pipeline.get_data("number_frequency")
-    fusion_data = pipeline.get_data("bayesian_fusion")  # Must be 40-length normalized array
 
-    if frequency_data is None or len(frequency_data) != 40:
-        logging.error("Frequency data missing or not length 40 for main numbers.")
-        return
-    if fusion_data is None or len(fusion_data) != 40:
-        logging.error("Bayesian fusion data missing or not length 40.")
-        return
+    fusion = pipeline.get_data("bayesian_fusion")
 
-    # Step 2: Combine and normalize
-    fused_array = np.column_stack((frequency_data, fusion_data))
-    fused_array = fused_array / fused_array.max(axis=0)
+    # --- Validate & normalize input ---
+    if fusion is None or len(fusion) != NUM_TOTAL:
+        logging.error(f"Bayesian fusion data missing or invalid length (expected {NUM_TOTAL}). Using uniform fallback.")
+        fusion = np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL
+    else:
+        fusion = np.array(fusion, dtype=float)
 
-    # Step 3: MinMax scaling
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(fused_array)
+    # Split into main and Powerball sections
+    fusion_main = fusion[:NUM_MAIN]
+    fusion_power = fusion[NUM_MAIN:]
 
-    # Step 4: Low variance adjustment
-    if np.std(data_scaled) < 0.01:
-        logging.warning("Low variance in main number data; reducing clusters to 2.")
-        n_clusters = min(n_clusters, 2)
+    # Normalize each section individually
+    fusion_main = fusion_main / (fusion_main.sum() or 1.0)
+    fusion_power = fusion_power / (fusion_power.sum() or 1.0)
+
+    # =========================================================
+    # MAIN NUMBER CLUSTERING
+    # =========================================================
+    scaler_main = MinMaxScaler()
+    data_main_scaled = scaler_main.fit_transform(fusion_main.reshape(-1, 1))
+
+    if np.std(data_main_scaled) < 0.01:
+        logging.warning("Low variance in main fusion; reducing clusters to 2.")
+        n_clusters_main = min(n_clusters_main, 2)
 
     try:
-        # Step 5: Fit KMeans model
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        kmeans.fit(data_scaled)
+        kmeans_main = KMeans(n_clusters=n_clusters_main, random_state=42, n_init=10)
+        kmeans_main.fit(data_main_scaled)
+        labels_main = kmeans_main.labels_
+        centroids_main = kmeans_main.cluster_centers_[labels_main].flatten()
 
-        # Step 6: Extract results
-        labels = kmeans.labels_
-        centroids = kmeans.cluster_centers_.flatten()
-
-        # Step 7: Store results
-        pipeline.add_data("clusters", labels)
-        pipeline.add_data("centroids", centroids)
-        pipeline.add_data("number_to_cluster", labels)
-
-        logging.info("Main number clustering with fusion completed successfully.")
-
+        # Normalize centroids to [0,1]
+        centroids_main = (centroids_main - np.min(centroids_main)) / (np.ptp(centroids_main) + 1e-9)
     except Exception as e:
-        logging.error(f"Error during main number clustering: {e}")
+        logging.error(f"Main number clustering failed: {e}")
+        labels_main = np.zeros(NUM_MAIN, dtype=int)
+        centroids_main = np.ones(NUM_MAIN, dtype=float) / NUM_MAIN
 
+    # =========================================================
+    # POWERBALL CLUSTERING
+    # =========================================================
+    scaler_power = MinMaxScaler()
+    data_power_scaled = scaler_power.fit_transform(fusion_power.reshape(-1, 1))
 
-def cluster_powerball_frequency(pipeline, n_clusters=3):
-    """
-    Performs K-Means clustering on Powerball frequency data combined with Bayesian fusion.
-    Fusion is mandatory. Maintains 10-number array shape.
-    """
-    powerball_data = pipeline.get_data("powerball_frequency")
-    fusion_data = pipeline.get_data("bayesian_fusion_powerball")  # Must be 10-length normalized array
-
-    if powerball_data is None or len(powerball_data) != 10:
-        logging.error("Powerball frequency data missing or not length 10.")
-        return
-    if fusion_data is None or len(fusion_data) != 10:
-        logging.error("Bayesian fusion Powerball data missing or not length 10.")
-        return
-
-    # Combine and normalize
-    fused_array = np.column_stack((powerball_data, fusion_data))
-    fused_array = fused_array / fused_array.max(axis=0)
-
-    # MinMax scaling
-    scaler = MinMaxScaler()
-    data_scaled = scaler.fit_transform(fused_array)
-
-    # Low variance adjustment
-    if np.std(data_scaled) < 0.01:
-        logging.warning("Low variance in Powerball data; reducing clusters to 2.")
-        n_clusters = min(n_clusters, 2)
+    if np.std(data_power_scaled) < 0.01:
+        logging.warning("Low variance in Powerball fusion; reducing clusters to 2.")
+        n_clusters_powerball = min(n_clusters_powerball, 2)
 
     try:
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        kmeans.fit(data_scaled)
+        kmeans_power = KMeans(n_clusters=n_clusters_powerball, random_state=42, n_init=10)
+        kmeans_power.fit(data_power_scaled)
+        labels_power = kmeans_power.labels_
+        centroids_power = kmeans_power.cluster_centers_[labels_power].flatten()
 
-        labels = kmeans.labels_
-        centroids = kmeans.cluster_centers_.flatten()
-
-        pipeline.add_data("powerball_clusters", labels)
-        pipeline.add_data("powerball_centroids", centroids)
-        logging.info("Powerball clustering with fusion completed successfully.")
-
+        # Normalize centroids to [0,1] within Powerball domain
+        centroids_power = (centroids_power - np.min(centroids_power)) / (np.ptp(centroids_power) + 1e-9)
     except Exception as e:
-        logging.error(f"Error during Powerball clustering: {e}")
+        logging.error(f"Powerball clustering failed: {e}")
+        labels_power = np.zeros(NUM_POWERBALL, dtype=int)
+        centroids_power = np.ones(NUM_POWERBALL, dtype=float) / NUM_POWERBALL
 
+    # =========================================================
+    # COMBINE (MAIN + POWERBALL)
+    # =========================================================
+    combined_labels = np.concatenate((labels_main, labels_power)).astype(int)
+    combined_centroids = np.concatenate((centroids_main, centroids_power)).astype(float)
+
+    # --- Ensure valid probabilistic scaling ---
+    combined_centroids = np.clip(combined_centroids, 0.0, 1.0)
+    combined_centroids /= combined_centroids.sum() or 1.0
+
+    # =========================================================
+    # STORE UNIFIED OUTPUTS
+    # =========================================================
+    pipeline.add_data("clusters", combined_labels)
+    pipeline.add_data("centroids", combined_centroids)
+    pipeline.add_data("number_to_cluster", combined_labels)
+
+    logging.info("K-Means clustering completed.")
 

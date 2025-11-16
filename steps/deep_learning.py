@@ -1,175 +1,216 @@
 ﻿## Modified By: Callam
 ## Project: Lotto Generator
-## Purpose of File: Deep Learning Prediction for Lottery Numbers
+## Purpose of File: Deep Learning Prediction for Lottery Numbers (Shape 50)
 ## Description:
-## This file utilizes a deep learning model to predict probabilities for the 40 main lottery numbers
-## as well as the powerball range between 1-10. The model leverages historical data,
-## Monte Carlo results, clustering information, redundancy (recency/gap) data, Markov transition
-## probabilities, entropy, and Bayesian fusion. The predictions are normalized to produce a probability
-## distribution, which is used in ticket generation.
+##    Predict probabilities for 40 main numbers + 10 Powerball numbers using historical,
+##    Monte Carlo, clustering, redundancy, Markov, entropy, and Bayesian fusion features.
+##    Features are concatenated into shape 50 for deep learning input.
 
 import numpy as np
-import tensorflow as tf  # type: ignore
-from tensorflow import keras  # type: ignore
+import tensorflow as tf
+from tensorflow import keras
 from pipeline import get_dynamic_params
 from config.logs import EpochLogger
+import logging
+
+from steps.quantum_features import compute_quantum_features, QUANTUM_FEATURE_LEN
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# --- Constants ---
+NUM_MAIN = 40
+NUM_POWERBALL = 10
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL
+LABEL_SMOOTH = 0.95
+DATA_AUGMENTATION_ROUNDS = 100
+NOISE_STDDEV = 0.05
+BATCH_SIZE = 32
+MIN_CLASS_WEIGHT = 1.0
+MAX_CLASS_WEIGHT = 10.0
+MIN_PROB = 1e-12
+
 
 def deep_learning_prediction(pipeline):
-    """
-    Utilizes a deep learning model to predict the independent probability of each of the 40 lottery numbers
-    being drawn, using sigmoid outputs and binary crossentropy loss to handle multi-label classification.
 
-    Parameters:
-    - pipeline (DataPipeline): The pipeline object containing shared data across steps.
-
-    Returns:
-    - None: Adds "deep_learning_predictions" to the pipeline.
-    """
-
-    # Step 1: Retrieve necessary data
+    # Step 1: pull historical + feature data from pipeline
     historical_data = pipeline.get_data("historical_data")
     if not historical_data:
-        print("No historical data available for deep learning prediction.")
-        pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
+        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
     monte_carlo = pipeline.get_data("monte_carlo")
+    redundancy = pipeline.get_data("redundancy")
+    markov = pipeline.get_data("markov_features")
+    entropy = pipeline.get_data("entropy_features")
+    fusion_norm = pipeline.get_data("bayesian_fusion_norm")
     clusters = pipeline.get_data("clusters")
     centroids = pipeline.get_data("centroids")
-    redundancy = pipeline.get_data("redundancy")      # Recency/gap data
-    markov = pipeline.get_data("markov_features")     # Markov transition probabilities
-    entropy = pipeline.get_data("entropy_features")   # Entropy features
-    fusion_norm = pipeline.get_data("bayesian_fusion_norm")  # Bayesian fusion (normalized for DL)
 
-    if any(v is None for v in [monte_carlo, clusters, centroids,
-                               redundancy, markov, entropy, fusion_norm]):
-        print("Necessary data missing for deep learning prediction.")
-        pipeline.add_data("deep_learning_predictions", np.ones(40) / 40)
+    required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
+    if any(v is None for v in required):
+        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
-    # Step 2: Normalize inputs
-    mc_max = max(monte_carlo.max(), 1e-12)
-    red_max = max(redundancy.max(), 1e-12)
-    mk_max = max(markov.max(), 1e-12)
-    ent_max = max(entropy.max(), 1e-12)
-    fu_max = max(fusion_norm.max(), 1e-12)
+    # Step 2: safe normalization
+    def _safe_norm(x):
+        x = np.asarray(x, dtype=float)
+        max_val = max(np.max(x), MIN_PROB)
+        return x / max_val
 
-    monte_carlo_norm = monte_carlo / mc_max
-    redundancy_norm = redundancy / red_max
-    markov_norm = markov / mk_max
-    entropy_norm = entropy / ent_max
-    fusion_norm = fusion_norm / fu_max   # re-safeguard to [0,1]
+    monte_carlo = _safe_norm(monte_carlo)
+    redundancy = _safe_norm(redundancy)
+    markov = _safe_norm(markov)
+    entropy = _safe_norm(entropy)
+    fusion_norm = _safe_norm(fusion_norm)
 
-    # Step 3: Assemble feature set (decay removed)
-    features = np.column_stack((
-        monte_carlo_norm,
-        redundancy_norm,
-        markov_norm,
-        entropy_norm,
-        fusion_norm,            # Bayesian Fusion
-        centroids[clusters]
-    ))
+    clusters = np.asarray(clusters, dtype=int)
+    centroids = np.asarray(centroids, dtype=float)
+    centroids_for_rows = centroids[clusters]
 
-    # Step 4: Create binary labels from historical draw data (with label smoothing)
+    # Step 3: classical feature block
+    base_features = np.column_stack(
+        (
+            monte_carlo,
+            redundancy,
+            markov,
+            entropy,
+            fusion_norm,
+            centroids_for_rows,
+        )
+    )
+
+    # Step 4: quantum features per row
+    quantum_rows = []
+    for row in base_features:
+        quantum_rows.append(compute_quantum_features(row))
+
+    quantum_rows = np.vstack(quantum_rows)
+
+    # final feature matrix
+    features = np.hstack((base_features, quantum_rows))
+
+    # Step 5: smoothed binary labels
     labels = []
     for draw in historical_data:
-        binary_label = np.zeros(40)
-        for num in draw["numbers"]:
-            if 1 <= num <= 40:
-                binary_label[num - 1] = 0.95  # label smoothing
-        labels.append(binary_label)
-    labels = np.array(labels)
+        arr = np.zeros(NUM_TOTAL, dtype=float)
+        for num in draw.get("numbers", []):
+            if 1 <= num <= NUM_TOTAL:
+                arr[num - 1] = LABEL_SMOOTH
+        labels.append(arr)
 
-    # Step 5: Compute class weights
+    labels = np.asarray(labels, dtype=float)
+
+    # Step 6: class weights
     pos_counts = labels.sum(axis=0)
     neg_counts = len(labels) - pos_counts
-    class_weights = neg_counts / (pos_counts + 1e-6)
-    class_weights = np.clip(class_weights, 1.0, 10.0)
+    class_weights = neg_counts / (pos_counts + MIN_PROB)
+    class_weights = np.clip(class_weights, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT)
 
-    # Step 6: Weighted binary crossentropy
+    # Step 7: weighted BCE
     def weighted_binary_crossentropy(weights):
+        weights = tf.constant(weights, dtype=tf.float32)
+
         def loss_fn(y_true, y_pred):
             bce = keras.backend.binary_crossentropy(y_true, y_pred)
-            weight_tensor = y_true * weights + (1.0 - y_true)
-            return keras.backend.mean(weight_tensor * bce, axis=-1)
+            w = y_true * weights + (1.0 - y_true)
+            return keras.backend.mean(w * bce, axis=-1)
+
         return loss_fn
 
-    # Step 7: Data augmentation
-    augmented_features = []
-    augmented_labels = []
-    for _ in range(100):
-        noise = np.random.normal(0, 0.05, features.shape)
-        augmented_features.append(features + noise)
-        augmented_labels.extend(labels)
+    # Step 8: gaussian augmentation on features
+    augmented_f = []
+    augmented_l = []
 
-    augmented_features = np.vstack(augmented_features)
-    augmented_labels = np.vstack(augmented_labels)
+    for _ in range(DATA_AUGMENTATION_ROUNDS):
+        noise = np.random.normal(0.0, NOISE_STDDEV, features.shape)
+        augmented_f.append(features + noise)
+        augmented_l.extend(labels)
 
-    # Step 8: Dynamic training parameters
+    augmented_f = np.vstack(augmented_f)
+    augmented_l = np.vstack(augmented_l)
+
+    # Step 9: dynamic epoch system (then capped to avoid quantum overfit)
     num_draws = len(historical_data)
     mc_sims, dynamic_epochs = get_dynamic_params(num_draws)
 
-    # Step 9: Define model architecture
-    model = keras.Sequential([
-        keras.layers.Input(shape=(features.shape[1],)),
-        keras.layers.Dense(128, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.2),
+    # hard cap for quantum-heavy model
+    dynamic_epochs = min(dynamic_epochs, 40)
 
-        keras.layers.Dense(64, activation="relu", kernel_regularizer=keras.regularizers.l2(0.0005)),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.2),
+    input_dim = augmented_f.shape[1]
 
-        keras.layers.Dense(40, activation="sigmoid")
-    ])
+    # Step 10: model arch (only regularization changed)
+    model = keras.Sequential(
+        [
+            keras.layers.Input(shape=(input_dim,)),
+            keras.layers.Dense(
+                256, activation="relu",
+                kernel_regularizer=keras.regularizers.l2(0.001)  # stronger L2
+            ),
+            keras.layers.BatchNormalization(),
+            keras.layers.Dropout(0.4),  # stronger dropout
 
-    # Step 10: Compile model
-    model.compile(
-        optimizer=keras.optimizers.Adam(),
-        loss=weighted_binary_crossentropy(tf.constant(class_weights, dtype=tf.float32)),
-        metrics=[
-            keras.metrics.BinaryAccuracy(name="binary_accuracy"),
-            keras.metrics.AUC(name="auc"),
-            keras.metrics.MeanAbsoluteError(name="mae")
+            keras.layers.Dense(
+                128, activation="relu",
+                kernel_regularizer=keras.regularizers.l2(0.001)
+            ),
+            keras.layers.BatchNormalization(),
+            keras.layers.Dropout(0.4),
+
+            keras.layers.Dense(NUM_TOTAL, activation="sigmoid"),
         ]
     )
 
-    # Step 11: Callbacks
+    # Step 11: compile
+    model.compile(
+        optimizer=keras.optimizers.Adam(),
+        loss=weighted_binary_crossentropy(class_weights),
+        metrics=[
+            keras.metrics.BinaryAccuracy(name="binary_accuracy"),
+            keras.metrics.AUC(name="auc"),
+            keras.metrics.MeanAbsoluteError(name="mae"),
+        ],
+    )
+
+    # Step 12: callbacks (tighter early stop)
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(
             monitor="val_loss",
             factor=0.8,
             patience=5,
             verbose=1,
-            min_lr=1e-7
+            min_lr=1e-7,
         ),
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=10,
-            min_delta=0.001,
+            patience=6,        # tighter
+            min_delta=0.002,   # stricter improvement requirement
             restore_best_weights=True,
-            verbose=1
+            verbose=1,
         ),
-        EpochLogger()
+        EpochLogger(),
     ]
 
-    # Step 12: Train model
-    history = model.fit(
-        augmented_features,
-        augmented_labels,
+    # Step 13: train
+    model.fit(
+        augmented_f,
+        augmented_l,
         epochs=dynamic_epochs,
-        batch_size=32,
+        batch_size=BATCH_SIZE,
         verbose=1,
         validation_split=0.15,
-        callbacks=callbacks
+        callbacks=callbacks,
     )
 
-    # Step 13: Predict and average
+    # Step 14: inference on clean features
     predictions = model.predict(features)
     final_prediction = np.mean(predictions, axis=0)
 
-    # Step 14: Store results
+    # Step 15: push to pipeline
     pipeline.add_data("deep_learning_predictions", final_prediction)
+    logging.info("Deep learning predictions (quantum anti-overfit) complete.")
+
+
+
 
 
 
