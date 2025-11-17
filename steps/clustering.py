@@ -2,16 +2,12 @@
 ## Project: Lotto Generator  
 ## Purpose of File: Perform K-Means Clustering on Bayesian Fusion Probabilities  
 ## Description:  
-<<<<<<< HEAD
-## Clusters both main (1–40) and Powerball (1–10) Bayesian fusion probabilities.  
-## Produces unified cluster labels and centroid influence vectors of shape (50,).  
-## Each section is scaled within its domain, then concatenated to preserve probabilistic structure.
-=======
+
 ## This file applies K-Means clustering to identify patterns or groupings in the frequency data   
 ## of both main lottery numbers (1–40) and Powerball numbers (1–10), incorporating Bayesian fusion  
 ## for both datasets. Clustering results, including labels and centroids, are stored in the pipeline  
 ## for use in subsequent predictive modeling steps.  
->>>>>>> 2c8488b95f520be890fa7fd7753dabbafbfe5127
+
 
 import numpy as np
 from sklearn.cluster import KMeans
