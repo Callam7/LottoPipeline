@@ -3,6 +3,7 @@
 ## Purpose of File: Perform K-Means Clustering on Bayesian Fusion Probabilities  
 ## Description:  
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## Clusters both main (1–40) and Powerball (1–10) Bayesian fusion probabilities.  
 ## Produces unified cluster labels and centroid influence vectors of shape (50,).  
 ## Each section is scaled within its domain, then concatenated to preserve probabilistic structure.
@@ -12,12 +13,19 @@
 ## Produces unified cluster labels and centroid influence vectors of shape (50,).  
 ## Each section is scaled within its domain, then concatenated to preserve probabilistic structure.
 =======
+=======
+
+>>>>>>> ae06da4158e26ede5593b4f110fa860ed1acc769
 ## This file applies K-Means clustering to identify patterns or groupings in the frequency data   
 ## of both main lottery numbers (1–40) and Powerball numbers (1–10), incorporating Bayesian fusion  
 ## for both datasets. Clustering results, including labels and centroids, are stored in the pipeline  
 ## for use in subsequent predictive modeling steps.  
+<<<<<<< HEAD
 >>>>>>> 2c8488b95f520be890fa7fd7753dabbafbfe5127
 >>>>>>> c6b77838891a23ba80277aa624b8cf48fd3b994f
+=======
+
+>>>>>>> ae06da4158e26ede5593b4f110fa860ed1acc769
 
 import numpy as np
 from sklearn.cluster import KMeans
