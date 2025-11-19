@@ -2,10 +2,9 @@
 ## Project: Lotto Generator
 ## Purpose of File: Ticket Generation from Deep Learning Predictions
 ## Description:
-## Generates complete lottery tickets using the final deep learning output
-## (which integrates Bayesian fusion, clustering, Monte Carlo, redundancy, Markov,
-## entropy, and historical features). Applies diversity penalties to reduce repetition
-## and uses Powerball decay weighting if available.
+## Generates complete lottery tickets using ONLY the final deep learning output.
+## (DL already includes Monte Carlo, Markov, entropy, clustering, fusion, quantum, etc.)
+## Applies diversity penalties to avoid repetitive lines.
 
 import numpy as np
 from data_io import save_current_ticket
@@ -27,34 +26,54 @@ def safe_norm(x):
 
 def generate_ticket(pipeline):
     """
-    Generates a ticket using deep learning predictions with diversity and Powerball weighting.
+    Generates a ticket using ONLY deep learning predictions.
     """
-    # Retrieve final probabilities and decay data
     predictions = pipeline.get_data("deep_learning_predictions")
-    decay_factors = pipeline.get_data("decay_factors")
 
-    if predictions is None or len(predictions) != NUM_MAIN_NUMBERS:
+    expected_len = NUM_MAIN_NUMBERS + NUM_POWERBALLS
+
+    # ==============================
+    # Fallback if predictions missing
+    # ==============================
+    if predictions is None or len(predictions) != expected_len:
         print("Missing or invalid predictions. Falling back to uniform distribution.")
-        fallback = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
+        fallback_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
+        fallback_pb = np.ones(NUM_POWERBALLS) / NUM_POWERBALLS
+
         ticket = [
             {
-                "line": sorted(np.random.choice(
-                    np.arange(1, NUM_MAIN_NUMBERS + 1),
-                    NUM_PER_LINE,
-                    replace=False,
-                    p=fallback
-                )),
-                "powerball": np.random.randint(1, NUM_POWERBALLS + 1)
+                "line": sorted(
+                    np.random.choice(
+                        np.arange(1, NUM_MAIN_NUMBERS + 1),
+                        NUM_PER_LINE,
+                        replace=False,
+                        p=fallback_main
+                    )
+                ),
+                "powerball": np.random.choice(
+                    np.arange(1, NUM_POWERBALLS + 1),
+                    p=fallback_pb
+                )
             }
             for _ in range(NUM_LINES)
         ]
         save_current_ticket(ticket)
         return ticket
 
-    # Normalize deep learning output
-    numbers_prob = safe_norm(predictions)
+    # ==============================
+    # Use deep learning output directly
+    # ==============================
+    predictions = np.asarray(predictions, dtype=float)
 
-    # Initialize diversity control
+    # First 40 = main numbers
+    main_prob = safe_norm(predictions[:NUM_MAIN_NUMBERS])
+
+    # Last 10 = powerball
+    powerball_prob = safe_norm(predictions[NUM_MAIN_NUMBERS:])
+
+    # ==============================
+    # Generate lines with diversity penalty
+    # ==============================
     ticket = []
     seen_combinations = set()
     frequency_penalty = np.zeros(NUM_MAIN_NUMBERS)
@@ -62,9 +81,9 @@ def generate_ticket(pipeline):
     for _ in range(NUM_LINES):
         while True:
             denom = frequency_penalty.sum() + 1
-            adjusted_prob = numbers_prob - DIVERSITY_PENALTY * (frequency_penalty / denom)
+            adjusted_prob = main_prob - DIVERSITY_PENALTY * (frequency_penalty / denom)
             adjusted_prob = np.clip(adjusted_prob, MIN_PROBABILITY, None)
-            adjusted_prob /= adjusted_prob.sum()
+            adjusted_prob = adjusted_prob / adjusted_prob.sum()
 
             main_numbers = sorted(
                 np.random.choice(
@@ -79,20 +98,19 @@ def generate_ticket(pipeline):
                 seen_combinations.add(tuple(main_numbers))
                 break
 
-        # Update diversity penalties
-        for num in main_numbers:
-            frequency_penalty[num - 1] += 1
+        # Update penalties
+        for n in main_numbers:
+            frequency_penalty[n - 1] += 1
 
-        # Powerball weighting (decay-aware)
-        if decay_factors and isinstance(decay_factors, dict) and "powerball" in decay_factors:
-            powerball_prob = safe_norm(np.array(decay_factors["powerball"], dtype=float))
-        else:
-            powerball_prob = np.ones(NUM_POWERBALLS) / NUM_POWERBALLS
-
-        powerball = np.random.choice(np.arange(1, NUM_POWERBALLS + 1), p=powerball_prob)
+        # Powerball directly from DL
+        powerball = np.random.choice(
+            np.arange(1, NUM_POWERBALLS + 1),
+            p=powerball_prob
+        )
 
         ticket.append({"line": main_numbers, "powerball": powerball})
 
     save_current_ticket(ticket)
     return ticket
+
 
