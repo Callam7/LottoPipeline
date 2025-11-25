@@ -92,21 +92,6 @@ def analyze_number_frequency(pipeline: Any) -> None:
                 invalid_pb.append(pb)
         else:
             invalid_pb.append(pb)
-<<<<<<< HEAD
-=======
-
-    if invalid_main:
-        logging.warning("Encountered invalid main numbers (ignored): %s", sorted(set(invalid_main)))
-    if invalid_pb:
-        logging.warning("Encountered invalid powerball numbers (ignored): %s", sorted(set(invalid_pb)))
-
-    # Save separately and also combined for downstream compatibility
-    pipeline.add_data("number_frequency", main_frequency)
-    pipeline.add_data("powerball_frequency", powerball_frequency)
-    pipeline.add_data("number_frequency_combined", np.concatenate([main_frequency, powerball_frequency]))
-
-    logging.info("Number frequency analysis completed.")
->>>>>>> c6b77838891a23ba80277aa624b8cf48fd3b994f
 
     if invalid_main:
         logging.warning("Encountered invalid main numbers (ignored): %s", sorted(set(invalid_main)))
