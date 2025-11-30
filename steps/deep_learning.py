@@ -64,6 +64,13 @@ MIN_PROB = 1e-12
 # Recency decay controls
 DECAY_RATE = 0.01  # stronger = more emphasis on recent draws
 
+# Persistent multi-label AUC metric to avoid retracing
+_AUC_METRIC = keras.metrics.AUC(
+    multi_label=True,
+    num_labels=NUM_TOTAL
+)
+
+
 
 def deep_learning_prediction(pipeline):
     """
@@ -327,37 +334,39 @@ def deep_learning_prediction(pipeline):
 
     def _auc_score(y_true, y_pred):
         """
-        Multi-label AUC for (n_samples, 50).
+        Efficient multi-label AUC using a persistent metric.
 
-        Hard guarantees:
-            - converts to float32 numpy
-            - aligns leading dimension to prevent augmented leakage
-            - uses multi_label=True so Keras doesn't misinterpret shape
+        Ensures:
+            - No metric recreation
+            - No tf.function retracing
+            - Safe shape alignment
+            - Compatible with Keras multi-label AUC
         """
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
 
-        # Enforce leading-dimension match deterministically
+        # Align sample dimension
         n0 = y_true.shape[0]
         n1 = y_pred.shape[0]
-        n = min(n0, n1)
+        n  = n0 if n0 == n1 else min(n0, n1)
 
-        if n0 != n1:
-            y_true = y_true[:n]
-            y_pred = y_pred[:n]
+        y_true = y_true[:n]
+        y_pred = y_pred[:n]
 
-        m = keras.metrics.AUC(multi_label=True, num_labels=y_true.shape[1])
-        m.update_state(y_true, y_pred)
-        return float(m.result().numpy())
+        # Reset and reuse metric
+        _AUC_METRIC.reset_state()
+        _AUC_METRIC.update_state(y_true, y_pred)
 
+        return float(_AUC_METRIC.result().numpy())
     try:
         dl_auc = _auc_score(labels, dl_pred_matrix)
         q_auc = _auc_score(labels, q_pred_matrix)
-        denom = max(dl_auc + q_auc, 1e-9)
-        alpha = dl_auc / denom
+        total = dl_auc + q_auc
+        alpha = dl_auc / total if total > 1e-9 else 0.7
     except Exception as e:
         logging.warning(f"Fusion AUC evaluation failed: {e}")
         alpha = 0.7
+
 
     # ---------------- Step 19: Final Fusion + Output ---------------- #
 

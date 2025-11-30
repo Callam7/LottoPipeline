@@ -23,7 +23,9 @@ from database import (
 from data_io import load_current_ticket, save_current_ticket
 
 # Pipeline structure
-from pipeline import DataPipeline, generate_ticket
+from pipeline import DataPipeline
+from steps.generate_ticket import generate_ticket
+
 
 # Pipeline steps
 from steps.historical import process_historical_data
@@ -208,13 +210,12 @@ def main():
             safe_run(bayesian_fusion_with_mechanics, pipeline, "Bayesian Fusion")
             safe_run(kmeans_clustering_and_correlation, pipeline, "Clustering")
             safe_run(monte_carlo_simulation, pipeline, "Monte Carlo Simulation")
-            safe_run(sequential_features, pipeline, "Sequential/Redundancy")  # moved before markov
+            safe_run(sequential_features, pipeline, "Sequential/Redundancy")  
             safe_run(markov_features, pipeline, "Markov Features")
             safe_run(shannon_entropy_features, pipeline, "Entropy Features")
             safe_run(deep_learning_prediction, pipeline, "Deep Learning Prediction")
             # --- Generate Ticket ---
             new_ticket = generate_ticket(pipeline)
-            save_current_ticket(new_ticket)
             print("\nNew ticket generated:")
             for idx, line in enumerate(new_ticket, 1):
                 print(f"Line {idx}: {line['line']} | Powerball: {line['powerball']}")
