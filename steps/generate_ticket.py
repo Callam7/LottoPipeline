@@ -1,15 +1,17 @@
 ## Modified By: Callam
 ## Project: Lotto Generator
-## Purpose: Pure predictive ticket generation from DL output
+## Purpose: Pure predictive ticket generation from final fused DL output
 ## Notes:
-##   - Uses ONLY deep learning predictions (already fused + quantum enhanced)
-##   - Exponential diversity penalty preserves probability structure
-##   - Pipeline data structure remains untouched
+##   - NO diversity systems
+##   - NO penalties
+##   - NO frequency reinforcement
+##   - NO additional weighting
+##   - The deep_learning module already performs all modelling, so nothing here modifies probabilities
 
 import numpy as np
 from data_io import save_current_ticket
 
-# ====== Configuration Constants ======
+# ====== Configuration ======
 NUM_MAIN_NUMBERS = 40
 NUM_POWERBALLS = 10
 NUM_PER_LINE = 6
@@ -17,33 +19,39 @@ NUM_LINES = 12
 
 MIN_PROBABILITY = 1e-12
 
-# Diversity setting (keeps lines unique but does NOT distort probabilities)
-DIVERSITY_STRENGTH = 1.5
-
 
 def safe_norm(x):
-    """Normalize safely without destroying relative predictive strength."""
+    """
+    Normalise a probability vector safely without altering
+    predictive ordering or introducing distortions.
+    """
+    x = np.asarray(x, dtype=float)
     x = np.clip(x, MIN_PROBABILITY, None)
-    return x / x.sum()
+    s = x.sum()
+    if s <= 0:
+        return np.full_like(x, 1.0 / len(x))
+    return x / s
 
 
 def generate_ticket(pipeline):
     """
-    Generates lottery tickets using ONLY the final deep learning predictions.
-    The diversity penalty is exponential (multiplicative), so the predictive
-    distribution remains statistically correct.
-    """
-    predictions = pipeline.get_data("deep_learning_predictions")
+    Generate 12 ticket lines purely from the final fused DL predictions.
 
+    No added logic. No modifiers. No diversity adjustments.
+    The deep learning model carries the entire statistical structure.
+    """
+
+    predictions = pipeline.get_data("deep_learning_predictions")
     expected_len = NUM_MAIN_NUMBERS + NUM_POWERBALLS
 
-    # ==============================
-    # Safe fallback
-    # ==============================
+    # --------------------------
+    # Fallback safety
+    # --------------------------
     if predictions is None or len(predictions) != expected_len:
         print("Missing or invalid predictions. Using uniform fallback.")
+
         fallback_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS
-        fallback_pb = np.ones(NUM_POWERBALLS) / NUM_POWERBALLS
+        fallback_pb   = np.ones(NUM_POWERBALLS) / NUM_POWERBALLS
 
         ticket = [
             {
@@ -62,74 +70,48 @@ def generate_ticket(pipeline):
             }
             for _ in range(NUM_LINES)
         ]
+
         save_current_ticket(ticket)
         return ticket
 
-    # ==============================
-    # Pure deep learning output
-    # ==============================
+    # --------------------------
+    # Split predictions
+    # --------------------------
     predictions = np.asarray(predictions, dtype=float)
 
-    # First 40 = main
-    main_prob = safe_norm(predictions[:NUM_MAIN_NUMBERS])
-
-    # Last 10 = powerball
+    main_prob      = safe_norm(predictions[:NUM_MAIN_NUMBERS])
     powerball_prob = safe_norm(predictions[NUM_MAIN_NUMBERS:])
 
-    # ==============================
+    # --------------------------
     # Generate ticket lines
-    # ==============================
+    # --------------------------
     ticket = []
-    seen_combinations = set()
-
-    # Track frequency to encourage diversity WITHOUT biasing model predictions
-    frequency_penalty = np.zeros(NUM_MAIN_NUMBERS)
 
     for _ in range(NUM_LINES):
 
-        while True:
-            # -------------------------
-            # EXPONENTIAL PENALTY
-            # -------------------------
-            # This maintains *perfect predictive ordering*
-            # and applies only a smooth "anti-repeat" pressure.
-            denom = frequency_penalty.sum() + 1.0
-            penalty = np.exp(-DIVERSITY_STRENGTH * (frequency_penalty / denom))
-
-            # Multiplicative — NOT subtractive (preserves prediction fidelity)
-            adjusted_prob = main_prob * penalty
-            adjusted_prob = safe_norm(adjusted_prob)
-
-            # Draw main numbers
-            main_numbers = sorted(
-                np.random.choice(
-                    np.arange(1, NUM_MAIN_NUMBERS + 1),
-                    size=NUM_PER_LINE,
-                    replace=False,
-                    p=adjusted_prob
-                )
+        # Draw 6 unique main numbers
+        main_numbers = sorted(
+            np.random.choice(
+                np.arange(1, NUM_MAIN_NUMBERS + 1),
+                size=NUM_PER_LINE,
+                replace=False,
+                p=main_prob
             )
+        )
 
-            # Ensure unique lines only
-            if tuple(main_numbers) not in seen_combinations:
-                seen_combinations.add(tuple(main_numbers))
-                break
-
-        # Update frequency AFTER sampling
-        for n in main_numbers:
-            frequency_penalty[n - 1] += 1
-
-        # Draw powerball directly from DL distribution (no penalty needed)
+        # Draw Powerball
         powerball = np.random.choice(
             np.arange(1, NUM_POWERBALLS + 1),
             p=powerball_prob
         )
 
-        ticket.append({"line": main_numbers, "powerball": powerball})
+        ticket.append({
+            "line": main_numbers,
+            "powerball": powerball
+        })
 
-    # Save ticket
+    # Save for UI + frontend tracking
     save_current_ticket(ticket)
     return ticket
-
 
 

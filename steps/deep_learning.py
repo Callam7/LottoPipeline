@@ -11,18 +11,13 @@ Purpose:
 Design (single deterministic path):
     1) Build classical feature matrix from pipeline signals.
     2) Build smoothed multi-hot labels from historical draws.
-    3) Apply recency decay to emphasize newer draws.
-    4) Train quantum encoder (SPSA) to tune circuit weights against labels.
-    5) Compute quantum feature matrix and fuse with classical features.
-    6) Train deep learning model on fused features.
-    7) Train a quantum predictive head on quantum features.
-    8) Dynamically learn fusion weight from achieved AUCs.
-    9) Final prediction = AUC-weighted blend of DL + quantum-head probabilities.
-
-Notes:
-    - The quantum circuit is a black-box embedding. No TF backprop through it.
-    - SPSA is gradient-free and stable on simulators.
-    - Recency decay improves measurable predictive alignment to evolving statistics.
+    3) Train quantum encoder (SPSA) to tune circuit weights against labels.
+    4) Compute quantum feature matrix from tuned circuit.
+    5) Compute quantum kernel features (fidelity-based) from classical features.
+    6) Fuse classical + quantum + kernel features into one feature matrix.
+    7) Train deep learning model on fused features.
+    8) Train a quantum predictive head on quantum features.
+    9) Dynamically learn fusion weight from achieved AUCs.
 """
 
 import numpy as np
@@ -34,13 +29,14 @@ import logging
 from datetime import datetime
 
 from config.quantum_features import (
-    compute_quantum_features,
     compute_quantum_matrix,
     train_quantum_encoder,
     train_quantum_predictor,
     compute_quantum_prediction_matrix,
     QUANTUM_FEATURE_LEN,
 )
+
+from config.quantum_kernels import build_quantum_kernel_features
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -60,16 +56,6 @@ EPOCH_SIZE = 40
 MIN_CLASS_WEIGHT = 1.0
 MAX_CLASS_WEIGHT = 10.0
 MIN_PROB = 1e-12
-
-# Recency decay controls
-DECAY_RATE = 0.01  # stronger = more emphasis on recent draws
-
-# Persistent multi-label AUC metric to avoid retracing
-_AUC_METRIC = keras.metrics.AUC(
-    multi_label=True,
-    num_labels=NUM_TOTAL
-)
-
 
 
 def deep_learning_prediction(pipeline):
@@ -97,6 +83,7 @@ def deep_learning_prediction(pipeline):
 
     required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
     if any(v is None for v in required):
+        logging.error("Deep learning aborted: missing required features.")
         pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
@@ -115,7 +102,13 @@ def deep_learning_prediction(pipeline):
 
     clusters = np.asarray(clusters, dtype=int)
     centroids = np.asarray(centroids, dtype=float)
-    centroids_for_rows = centroids[clusters]
+
+    # Ensure indices are valid for centroids lookup
+    if np.any(clusters < 0) or np.any(clusters >= len(centroids)):
+        logging.warning("Cluster indices invalid. Broadcasting raw centroids as-is.")
+        centroids_for_rows = centroids
+    else:
+        centroids_for_rows = centroids[clusters]
 
     # ---------------- Step 3: Classical Feature Block ---------------- #
 
@@ -128,7 +121,7 @@ def deep_learning_prediction(pipeline):
             fusion_norm,
             centroids_for_rows,
         )
-    )  # shape (N, d_classical)
+    )  # expected shape: (N, d_classical) with N == NUM_TOTAL in this pipeline
 
     # ---------------- Step 4: Label Construction ---------------- #
 
@@ -137,9 +130,21 @@ def deep_learning_prediction(pipeline):
 
     for draw in historical_data:
         arr = np.zeros(NUM_TOTAL, dtype=float)
+
+        # Main numbers: positions 0..39 (numbers 1..40)
         for num in draw.get("numbers", []):
-            if 1 <= num <= NUM_TOTAL:
+            if isinstance(num, int) and 1 <= num <= NUM_MAIN:
                 arr[num - 1] = LABEL_SMOOTH
+
+        # Powerball: positions 40..49 (pb 1..10)
+        pb = draw.get("powerball")
+        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:
+            arr[NUM_MAIN + pb - 1] = LABEL_SMOOTH
+        elif isinstance(pb, (list, tuple)):
+            for p in pb:
+                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:
+                    arr[NUM_MAIN + p - 1] = LABEL_SMOOTH
+
         labels.append(arr)
 
         d_str = draw.get("date") or draw.get("draw_date")
@@ -152,47 +157,53 @@ def deep_learning_prediction(pipeline):
             dates.append(None)
 
     labels = np.asarray(labels, dtype=float)
+    num_draws = len(labels)
 
-    # ---------------- Step 5: Recency Decay Weights ---------------- #
-    # Newer draws receive higher weight during training.
+    # NOTE:
+    # Temporal / recency weighting is handled upstream in decay.py and redundancy.py.
+    # We DO NOT apply another exponential decay here to avoid double-counting recency.
 
-    n = len(labels)
+    # ---------------- Step 5: Train Quantum Encoder ---------------- #
 
-    if all(d is not None for d in dates):
-        max_date = max(dates)
-        ages = np.array([(max_date - d).days for d in dates], dtype=float)
-    else:
-        # Fallback: assume list is chronological
-        ages = np.arange(n, dtype=float)[::-1]
-
-    sample_weights = np.exp(-DECAY_RATE * ages)
-    sample_weights = sample_weights / np.mean(sample_weights)
-
-    # ---------------- Step 6: Train Quantum Encoder ---------------- #
-
+    # The quantum encoder is trained to compress the label geometry into qubit expectations.
     try:
         train_quantum_encoder(base_features, labels)
         logging.info("Quantum encoder training complete.")
     except Exception as e:
         logging.warning(f"Quantum encoder training failed: {e}")
 
-    # ---------------- Step 7: Compute Quantum Feature Matrix ---------------- #
+    # ---------------- Step 6: Compute Quantum + Kernel Features ---------------- #
 
+    # (a) Variational quantum features from tuned circuit
     try:
         quantum_features = compute_quantum_matrix(base_features)
-        features = np.hstack((base_features, quantum_features))
     except Exception as e:
-        logging.warning(f"Quantum feature build failed: {e}")
-        features = base_features
+        logging.error(f"Quantum feature matrix computation failed: {e}")
+        quantum_features = np.zeros((base_features.shape[0], QUANTUM_FEATURE_LEN), dtype=float)
 
-    # ---------------- Step 8: Class Weights ---------------- #
+    # (b) Quantum kernel fidelity features from classical feature space
+    try:
+        kernel_features = build_quantum_kernel_features(
+            base_features,
+            num_prototypes=24,
+            seed=1337,
+        )
+    except Exception as e:
+        logging.error(f"Quantum kernel feature computation failed: {e}")
+        # Fallback: no kernel features
+        kernel_features = np.zeros((base_features.shape[0], 24), dtype=float)
+
+    # (c) Final fused feature matrix
+    features = np.hstack((base_features, quantum_features, kernel_features))
+
+    # ---------------- Step 7: Class Weights ---------------- #
 
     pos = labels.sum(axis=0)
     neg = len(labels) - pos
     class_weights = neg / (pos + MIN_PROB)
     class_weights = np.clip(class_weights, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT)
 
-    # ---------------- Step 9: Weighted BCE ---------------- #
+    # ---------------- Step 8: Weighted BCE ---------------- #
 
     def weighted_bce(weights):
         weights_tf = tf.constant(weights, dtype=tf.float32)
@@ -206,31 +217,27 @@ def deep_learning_prediction(pipeline):
 
     weighted_loss = weighted_bce(class_weights)
 
-    # ---------------- Step 10: Gaussian Augmentation ---------------- #
+    # ---------------- Step 9: Gaussian Augmentation ---------------- #
 
     augmented_f = []
     augmented_l = []
-    augmented_w = []
 
     for _ in range(DATA_AUGMENTATION_ROUNDS):
         noise = np.random.normal(0.0, NOISE_STDDEV, features.shape)
         augmented_f.append(features + noise)
         augmented_l.append(labels)
-        augmented_w.append(sample_weights)
 
     augmented_f = np.vstack(augmented_f)
     augmented_l = np.vstack(augmented_l)
-    augmented_w = np.hstack(augmented_w)
 
-    # ---------------- Step 11: Dynamic Epoch Discovery ---------------- #
+    # ---------------- Step 10: Dynamic Epoch Discovery ---------------- #
 
-    num_draws = len(historical_data)
     _, dynamic_epochs = get_dynamic_params(num_draws)
-    dynamic_epochs = min(dynamic_epochs, EPOCH_SIZE)  # <-- cap restored to 68
+    dynamic_epochs = min(dynamic_epochs, EPOCH_SIZE)  # cap at EPOCH_SIZE
 
     input_dim = augmented_f.shape[1]
 
-    # ---------------- Step 12: DL Architecture ---------------- #
+    # ---------------- Step 11: DL Architecture ---------------- #
 
     model = keras.Sequential(
         [
@@ -264,19 +271,19 @@ def deep_learning_prediction(pipeline):
         ]
     )
 
-    # ---------------- Step 13: Compile ---------------- #
+    # ---------------- Step 12: Compile ---------------- #
 
     model.compile(
         optimizer=keras.optimizers.Adam(),
         loss=weighted_loss,
         metrics=[
             keras.metrics.BinaryAccuracy(name="binary_accuracy"),
-            keras.metrics.AUC(name="auc"),
+            keras.metrics.AUC(name="auc", multi_label=True, num_labels=NUM_TOTAL),
             keras.metrics.MeanAbsoluteError(name="mae"),
         ],
     )
 
-    # ---------------- Step 14: Callbacks ---------------- #
+    # ---------------- Step 13: Callbacks ---------------- #
 
     callbacks = [
         keras.callbacks.ReduceLROnPlateau(
@@ -296,25 +303,29 @@ def deep_learning_prediction(pipeline):
         EpochLogger(),
     ]
 
-    # ---------------- Step 15: Train DL ---------------- #
+    # ---------------- Step 14: Train DL ---------------- #
 
-    model.fit(
-        augmented_f,
-        augmented_l,
-        sample_weight=augmented_w,
-        epochs=dynamic_epochs,
-        batch_size=BATCH_SIZE,
-        validation_split=0.15,
-        verbose=1,
-        callbacks=callbacks,
-    )
+    try:
+        model.fit(
+            augmented_f,
+            augmented_l,
+            epochs=dynamic_epochs,
+            batch_size=BATCH_SIZE,
+            validation_split=0.15,
+            verbose=1,
+            callbacks=callbacks,
+        )
+    except Exception as e:
+        logging.error(f"Deep Learning training failed: {e}")
+        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL)
+        return
 
-    # ---------------- Step 16: DL Inference ---------------- #
+    # ---------------- Step 15: DL Inference ---------------- #
 
     dl_pred_matrix = model.predict(features, verbose=0)
     dl_pred = np.mean(dl_pred_matrix, axis=0).astype(float)
 
-    # ---------------- Step 17: Quantum Predictive Head ---------------- #
+    # ---------------- Step 16: Quantum Predictive Head ---------------- #
 
     try:
         train_quantum_predictor(base_features, labels)
@@ -327,37 +338,36 @@ def deep_learning_prediction(pipeline):
         q_pred = np.mean(q_pred_matrix, axis=0).astype(float)
     except Exception as e:
         logging.warning(f"Quantum prediction failed: {e}")
-        q_pred_matrix = np.zeros_like(labels, dtype=float)  # keep AUC stage safe
+        q_pred_matrix = np.zeros_like(labels, dtype=float)
         q_pred = np.zeros(NUM_TOTAL, dtype=float)
 
-    # ---------------- Step 18: Learn Fusion Weight from AUC ---------------- #
+    # ---------------- Step 17: Learn Fusion Weight ---------------- #
 
     def _auc_score(y_true, y_pred):
         """
-        Efficient multi-label AUC using a persistent metric.
-
-        Ensures:
-            - No metric recreation
-            - No tf.function retracing
-            - Safe shape alignment
-            - Compatible with Keras multi-label AUC
+        Efficient multi-label AUC for fusion weighting.
+        Uses a fresh Keras AUC metric instance per call to avoid
+        internal state contamination.
         """
         y_true = np.asarray(y_true, dtype=np.float32)
         y_pred = np.asarray(y_pred, dtype=np.float32)
 
-        # Align sample dimension
         n0 = y_true.shape[0]
         n1 = y_pred.shape[0]
-        n  = n0 if n0 == n1 else min(n0, n1)
+        n = n0 if n0 == n1 else min(n0, n1)
+        if n == 0:
+            return 0.5
 
         y_true = y_true[:n]
         y_pred = y_pred[:n]
 
-        # Reset and reuse metric
-        _AUC_METRIC.reset_state()
-        _AUC_METRIC.update_state(y_true, y_pred)
+        metric = keras.metrics.AUC(multi_label=True, num_labels=NUM_TOTAL)
+        metric.update_state(y_true, y_pred)
+        val = float(metric.result().numpy())
+        if not np.isfinite(val):
+            return 0.5
+        return val
 
-        return float(_AUC_METRIC.result().numpy())
     try:
         dl_auc = _auc_score(labels, dl_pred_matrix)
         q_auc = _auc_score(labels, q_pred_matrix)
@@ -367,13 +377,13 @@ def deep_learning_prediction(pipeline):
         logging.warning(f"Fusion AUC evaluation failed: {e}")
         alpha = 0.7
 
-
-    # ---------------- Step 19: Final Fusion + Output ---------------- #
+    # ---------------- Step 18: Final Fusion + Output ---------------- #
 
     final_prediction = alpha * dl_pred + (1.0 - alpha) * q_pred
     final_prediction = np.clip(final_prediction, 0.0, 1.0).astype(float)
 
     pipeline.add_data("deep_learning_predictions", final_prediction)
     logging.info(f"Deep learning predictions complete. Learned alpha={alpha:.4f}")
+
 
 
