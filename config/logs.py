@@ -28,29 +28,40 @@ class EpochLogger(tf.keras.callbacks.Callback):
         self.delay = delay
 
     def on_epoch_end(self, epoch, logs=None):
-        """
-        Called automatically by Keras after each epoch.
-        Inserts metrics into the 'epochs' table, then pauses briefly.
-        """
         if logs is None:
             return
 
+    # ---- Metric normalization layer (CRITICAL FIX) ----
+
+        def _get(*keys, default=0.0):
+            for k in keys:
+                if k in logs:
+                    return float(logs[k])
+            return float(default)
+
         try:
             insert_epoch_metrics(
-                run_date=self.run_date,
-                epoch=epoch + 1,  # store epochs as 1-based instead of 0-based
-                loss=float(logs.get("loss", 0.0)),
-                val_loss=float(logs.get("val_loss", 0.0)),
-                binary_accuracy=float(logs.get("binary_accuracy", 0.0)),
-                val_binary_accuracy=float(logs.get("val_binary_accuracy", 0.0)),
-                auc=float(logs.get("auc", 0.0)),
-                val_auc=float(logs.get("val_auc", 0.0)),
-                mae=float(logs.get("mae", 0.0)),
-                val_mae=float(logs.get("val_mae", 0.0)),
-            )
-            time.sleep(self.delay)  # pacing
+            run_date=self.run_date,
+            epoch=epoch + 1,
+
+            loss=_get("loss"),
+            val_loss=_get("val_loss"),
+
+            # Accept BOTH legacy and current metric names
+            binary_accuracy=_get("binary_accuracy", "bin_acc"),
+            val_binary_accuracy=_get("val_binary_accuracy", "val_bin_acc"),
+
+            auc=_get("auc"),
+            val_auc=_get("val_auc"),
+
+            mae=_get("mae"),
+            val_mae=_get("val_mae"),
+        )
+            time.sleep(self.delay)
+
         except Exception as e:
             print(f"[EpochLogger] Error inserting metrics: {e}")
+
 
 
 def get_run_date():

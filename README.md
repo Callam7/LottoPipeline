@@ -1,11 +1,15 @@
 # Lotto Generator
 
-**Author's Note**  
-This project will not predict lottery numbers with perfect accuracy. It’s a proof of concept to test ideas, build a scalable pipeline, and see how far different methods can push results against noisy, pseudo-random data.
+** Author’s Note **
 
-It started as a challenge to the claim that Lotto is “just random.” While draws are unpredictable, they follow fixed rules — main numbers 1–40, Powerball 1–10 — which makes them pseudo-random. That means patterns can be measured and methods applied to guide number selection.
+Before anything else: this project does **not** guarantee lottery predictions. Lotto NZ is a heavily regulated system, independently audited, and engineered to be fair at all times. Nothing in this repository overrides that fact, and nothing here should be treated as a promise of “winning numbers.” This project exists as a technical experiment — not a loophole.
 
-The project has since shifted toward laying the groundwork for a self-editing adaptive model. The idea is for the system to train on historical data, evaluate its own performance, and adjust over time. This hasn’t been reached yet, but the current pipeline is built to allow it.
+It started as a personal challenge to the idea that Lotto is “just random.” The rules never change: main numbers 1–40, Powerball 1–10. That makes it pseudo-random rather than chaotic. If anything meaningful exists in the structure, it should be measurable; if nothing exists, proving that is valuable too. What began as a small script grew into a full analytical and machine-learning pipeline designed to test structure, extract behavior, and see how far adaptive modelling can be pushed against a system intentionally designed to resist prediction.
+
+Over time the project shifted from “generate numbers” to a much larger goal: building the foundations of a self-adapting model — something capable of training on its own history, monitoring its performance, and modifying its own internal logic when needed. Lotto simply provides a stable sandbox to explore those ideas.
+
+As for the tools behind it: Python is my preferred language and the one I’m most fluent in. I know enough about other languages to an extent, such as C#, C++, Kotlin, SQL, and typescript, but Python gives me just a bit more flexibility, clarity, and ecosystem support required for something this experimental.
+
 
 ---
 
