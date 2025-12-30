@@ -1,12 +1,15 @@
 ## Modified By: Callam
 ## Project: Lotto Generator
-## Purpose: Pure predictive ticket generation from final fused DL output
-## Notes:
-##   - NO diversity systems
-##   - NO penalties
-##   - NO frequency reinforcement
-##   - NO additional weighting
-##   - The deep_learning module already performs all modelling, so nothing here modifies probabilities
+## Purpose: Predictive ticket generation with enforced cross-line penalty
+##
+## Design guarantees:
+##   - Uses ONLY deep_learning_predictions as the probability source
+##   - Applies a HARD, stateful penalty across ticket lines
+##   - No randomness injection beyond probabilistic sampling
+##   - No frequency reinforcement
+##   - No post-hoc shuffling or cosmetic fixes
+##   - Penalty is applied BEFORE renormalisation (mathematically effective)
+
 
 import numpy as np
 from data_io import save_current_ticket
@@ -19,26 +22,32 @@ NUM_LINES = 12
 
 MIN_PROBABILITY = 1e-12
 
+# Cross-line decay factors (HARD requirement)
+DECAY_MAIN = 0.7
+DECAY_POWERBALL = 0.6
+
 
 def safe_norm(x):
     """
-    Normalise a probability vector safely without altering
-    predictive ordering or introducing distortions.
+    Safely normalise a probability vector while preserving ordering.
     """
     x = np.asarray(x, dtype=float)
     x = np.clip(x, MIN_PROBABILITY, None)
     s = x.sum()
-    if s <= 0:
+    if s <= 0.0:
         return np.full_like(x, 1.0 / len(x))
     return x / s
 
 
 def generate_ticket(pipeline):
     """
-    Generate 12 ticket lines purely from the final fused DL predictions.
+    Generate a lottery ticket using deep learning predictions with
+    enforced cross-line probability decay.
 
-    No added logic. No modifiers. No diversity adjustments.
-    The deep learning model carries the entire statistical structure.
+    The decay mechanism guarantees:
+        - Reduced repetition across lines
+        - Stable statistical behaviour
+        - No distortion of within-line sampling
     """
 
     predictions = pipeline.get_data("deep_learning_predictions")
@@ -75,21 +84,25 @@ def generate_ticket(pipeline):
         return ticket
 
     # --------------------------
-    # Split predictions
+    # Prepare probability vectors
     # --------------------------
     predictions = np.asarray(predictions, dtype=float)
 
-    main_prob      = safe_norm(predictions[:NUM_MAIN_NUMBERS])
-    powerball_prob = safe_norm(predictions[NUM_MAIN_NUMBERS:])
+    base_main_prob = safe_norm(predictions[:NUM_MAIN_NUMBERS])
+    base_pb_prob   = safe_norm(predictions[NUM_MAIN_NUMBERS:])
+
+    # Working copies (stateful across lines)
+    main_prob = base_main_prob.copy()
+    pb_prob   = base_pb_prob.copy()
 
     # --------------------------
-    # Generate ticket lines
+    # Generate ticket with penalty
     # --------------------------
     ticket = []
 
     for _ in range(NUM_LINES):
 
-        # Draw 6 unique main numbers
+        # Draw unique main numbers
         main_numbers = sorted(
             np.random.choice(
                 np.arange(1, NUM_MAIN_NUMBERS + 1),
@@ -102,7 +115,7 @@ def generate_ticket(pipeline):
         # Draw Powerball
         powerball = np.random.choice(
             np.arange(1, NUM_POWERBALLS + 1),
-            p=powerball_prob
+            p=pb_prob
         )
 
         ticket.append({
@@ -110,7 +123,24 @@ def generate_ticket(pipeline):
             "powerball": powerball
         })
 
-    # Save for UI + frontend tracking
+        # --------------------------
+        # APPLY HARD PENALTIES
+        # --------------------------
+
+        # Penalise used main numbers
+        for n in main_numbers:
+            main_prob[n - 1] *= DECAY_MAIN
+
+        # Penalise used Powerball
+        pb_prob[powerball - 1] *= DECAY_POWERBALL
+
+        # Renormalise AFTER penalties
+        main_prob = safe_norm(main_prob)
+        pb_prob   = safe_norm(pb_prob)
+
+    # --------------------------
+    # Save and return
+    # --------------------------
     save_current_ticket(ticket)
     return ticket
 

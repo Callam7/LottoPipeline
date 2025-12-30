@@ -8,376 +8,494 @@ Purpose:
         - 10 Powerball numbers
     Output is always shape (50,), compatible with the ticket generator.
 
-Design (single deterministic path):
+Design:
+    This module does NOT assume determinism.
+    It assumes that if weak signal exists, it should not be suppressed
+    by over-regularisation, premature stopping, or metric noise.
+
+Pipeline stages:
     1) Build classical feature matrix from pipeline signals.
-    2) Build smoothed multi-hot labels from historical draws.
-    3) Train quantum encoder (SPSA) to tune circuit weights against labels.
+    2) Build strict multi-hot labels from historical draws.
+    3) Train quantum encoder (SPSA) to tune circuit weights.
     4) Compute quantum feature matrix from tuned circuit.
-    5) Compute quantum kernel features (fidelity-based) from classical features.
-    6) Fuse classical + quantum + kernel features into one feature matrix.
+    5) Compute quantum kernel features (fidelity-based).
+    6) Fuse classical + quantum + kernel features.
     7) Train deep learning model on fused features.
-    8) Train a quantum predictive head on quantum features.
-    9) Dynamically learn fusion weight from achieved AUCs.
 """
 
-import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from pipeline import get_dynamic_params
-from config.logs import EpochLogger
-import logging
-from datetime import datetime
+import numpy as np  # Core numerical array library used throughout
+import tensorflow as tf  # TensorFlow backend used for training and tensor ops
+from tensorflow import keras  # Keras API for model definition/training
+from config.logs import EpochLogger  # Custom callback to log epoch progress cleanly
+import logging  # Standard Python logging
 
-from config.quantum_features import (
-    compute_quantum_matrix,
-    train_quantum_encoder,
-    train_quantum_predictor,
-    compute_quantum_prediction_matrix,
-    QUANTUM_FEATURE_LEN,
+from config.quantum_features import (  # Imports quantum feature utilities/constants
+    compute_quantum_matrix,  # Builds quantum feature matrix from classical inputs
+    train_quantum_encoder,  # Trains/tunes the quantum encoder parameters
+    QUANTUM_FEATURE_LEN,  # Fixed width expected from compute_quantum_matrix output
 )
 
-from config.quantum_kernels import build_quantum_kernel_features
+from config import quantum_kernels as qk  # Imports module itself (to access cache vars)
+from config.quantum_kernels import build_quantum_kernel_features  # Builds kernel features
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")  # Set log format/level
 
 # ===================== Constants ===================== #
 
-NUM_MAIN = 40
-NUM_POWERBALL = 10
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL
+# Lottery structure
+NUM_MAIN = 40  # Main number count (1..40)
+NUM_POWERBALL = 10  # Powerball number count (1..10)
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL  # Total output width (50)
 
-EPOCH_SIZE = 60
-BATCH_SIZE = 32
+# Training configuration
+EPOCH_SIZE = 60  # Number of training epochs for the NN
+BATCH_SIZE = 32  # Mini-batch size
 
-DATA_AUGMENTATION_ROUNDS = 50
-NOISE_STDDEV = 0.03
+# Data augmentation (kept mild to preserve weak structure)
+DATA_AUGMENTATION_ROUNDS = 10  # How many noisy copies of train data to add
+NOISE_STDDEV = 0.01  # Noise scale applied to features (not labels)
 
-MIN_CLASS_WEIGHT = 1.0
-MAX_CLASS_WEIGHT = 8.0
-MIN_PROB = 1e-12
+# Class-weight bounds (prevents gradient saturation)
+MIN_CLASS_WEIGHT = 1.0  # Minimum positive-class weight
+MAX_CLASS_WEIGHT = 4.0  # Maximum positive-class weight
 
-LABEL_SMOOTHING = 0.05
-KERNEL_PROTOTYPES = 24
+# Numeric safety
+MIN_PROB = 1e-7  # Used for clipping probabilities and avoiding divide-by-zero
+
+# Quantum kernel configuration
+KERNEL_PROTOTYPES = 24  # Number of kernel prototypes (feature width for K_*)
 
 # ===================== GLOBAL LOSS STATE ===================== #
-class_weights = None
-class_weights_tf = None
-label_eps_tf = tf.constant(LABEL_SMOOTHING, dtype=tf.float32)
 
-# ===================== Tensor-safe Weighted BCE ===================== #
+# Computed once per training run
+class_weights = None  # Numpy weights computed from training label imbalance
+class_weights_tf = None  # TensorFlow constant version used inside loss
+
+# ===================== Quantum kernel cache reset ===================== #
+
+def _reset_quantum_kernel_cache():
+    """
+    Hard reset of quantum kernel prototype cache.
+
+    Prototype states are quantum statevectors that depend on
+    variational circuit weights. After encoder training, those
+    weights may change.
+
+    Reusing cached prototype states after a weight update would
+    silently corrupt kernel features.
+
+    This reset guarantees semantic consistency.
+    """
+    qk._cached_proto_states = None  # Drops cached prototype statevectors
+    qk._cached_num_prototypes = None  # Drops cached prototype count
+    qk._cached_seed = None  # Drops cached seed (prototypes are seed-dependent)
+
+# ===================== Weighted BCE (stable, no neutrality trap) ===================== #
 
 def weighted_bce(y_true, y_pred):
     """
-    Stable, graph-safe weighted BCE.
-    y_true/y_pred: (batch, 50)
-    """
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
+    Stable weighted binary cross-entropy.
 
-    # Manual label smoothing (shape preserving)
-    y_true_s = y_true * (1.0 - label_eps_tf) + 0.5 * label_eps_tf
+    Key properties:
+        - NO label smoothing (preserves ranking signal)
+        - Positive-class weighting only
+        - y_pred clipped for numerical safety
+
+    Shapes:
+        y_true: (batch, 50)
+        y_pred: (batch, 50)
+    """
+    # Ensures float tensors
+    y_true = tf.cast(y_true, tf.float32)  # Loss math assumes float tensors
+    y_pred = tf.cast(y_pred, tf.float32)  # Ensure predictions match dtype too
+
+    # Prevents log(0) and log(1)
+    y_pred = tf.clip_by_value(y_pred, MIN_PROB, 1.0 - MIN_PROB)  # Clamp to safe open interval
 
     # Per-label BCE -> (batch, 50)
-    bce = keras.backend.binary_crossentropy(y_true_s, y_pred)
+    bce = keras.backend.binary_crossentropy(y_true, y_pred)  # Elementwise BCE per label
 
-    # Per-label weights -> (batch, 50)
-    w = y_true * class_weights_tf + (1.0 - y_true)
+    # Applys class weighting to positives only
+    w = y_true * class_weights_tf + (1.0 - y_true)  # If y_true==1 apply weight else apply 1.0
 
-    return tf.reduce_mean(bce * w, axis=-1)
+    # Reduces to per-sample loss
+    return tf.reduce_mean(bce * w, axis=-1)  # Mean across labels, keep batch dimension
 
 # ===================== Shape utilities ===================== #
 
 def _ensure_2d(X, name):
-    X = np.asarray(X, dtype=float)
-    if X.ndim == 1:
-        X = X.reshape(1, -1)
-    if X.ndim != 2:
-        raise ValueError(f"{name} must be 2D, got shape {X.shape}")
-    return X
+    """
+    Ensure input is a 2D NumPy array.
+    """
+    X = np.asarray(X, dtype=float)  # Converts to float NumPy array
+    if X.ndim == 1:  # If vector, treat as single row
+        X = X.reshape(1, -1)  # Shape (1, features)
+    if X.ndim != 2:  # Rejects higher-rank inputs early
+        raise ValueError(f"{name} must be 2D, got shape {X.shape}")  # Fail fast with clear message
+    return X  # Returns 2D matrix
 
 def _force_width(M, width, name):
     """
-    Ensures M is (n, width) via pad/trim.
+    Enforce fixed feature width via deterministic pad/trim.
     """
-    M = _ensure_2d(M, name)
-    n, d = M.shape
-    if d == width:
-        return M.astype(float)
+    M = _ensure_2d(M, name)  # Ensures I can safely index shape
+    n, d = M.shape  # n rows, d columns
 
-    out = np.zeros((n, width), dtype=float)
-    m = min(d, width)
-    out[:, :m] = M[:, :m]
-    logging.warning(f"{name} width {d} != {width}; padded/trimmed to {width}.")
-    return out
+    if d == width:  # If already correct width, do nothing
+        return M.astype(float)  # Ensures dtype is float
 
-def _safe_norm_vec(x, name):
-    x = np.asarray(x, dtype=float).ravel()
-    if x.size != NUM_TOTAL:
-        raise ValueError(f"{name} expected len {NUM_TOTAL}, got {x.size}")
-    return x / max(float(np.max(x)), MIN_PROB)
+    out = np.zeros((n, width), dtype=float)  # Allocates padded/truncated output
+    m = min(d, width)  # Overlaps region length
+    out[:, :m] = M[:, :m]  # Copys overlap columns
 
-# ===================== Main Entry ===================== #
+    logging.warning(f"{name} width {d} != {width}; padded/trimmed to {width}.")  # Notifys shape correction
+    return out  # Returns width-fixed matrix
+
+def _prob_norm_vec(x, name):
+    """
+    Sum-normalise a probability-like vector.
+
+    Guarantees:
+        - length == 50
+        - non-negative
+        - sums to 1 (or uniform fallback)
+    """
+    x = np.asarray(x, dtype=float).ravel()  # Flattens to 1D float array
+
+    if x.size != NUM_TOTAL:  # Enforces expected output width (50)
+        raise ValueError(f"{name} expected len {NUM_TOTAL}, got {x.size}")  # Fail loud if wrong size
+
+    x = np.clip(x, 0.0, None)  # Probabilities must not be negative
+    s = float(x.sum())  # Total mass
+
+    if s <= 0.0:  # If vector is all zeros (or invalid), fallback to uniform
+        return np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL  # Uniform distribution across 50 bins
+
+    return x / s  # Normalise to sum 1
+
+# ===================== Main entry ===================== #
 
 def deep_learning_prediction(pipeline):
-    global class_weights, class_weights_tf
+    """
+    End-to-end deep learning prediction stage.
 
-    # ---------------- Step 1: Load pipeline inputs ---------------- #
+    Produces a (50,) probability vector and stores it in the pipeline
+    under key 'deep_learning_predictions'.
+    """
+    global class_weights, class_weights_tf  # Ensures loss can access run-specific weights
 
-    historical_data = pipeline.get_data("historical_data")
-    if not historical_data:
-        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL)
-        return
+    # ---------- Step 1: Load pipeline inputs ---------- #
 
-    monte_carlo = pipeline.get_data("monte_carlo")
-    redundancy  = pipeline.get_data("redundancy")
-    markov      = pipeline.get_data("markov_features")
-    entropy     = pipeline.get_data("entropy_features")
-    fusion_norm = pipeline.get_data("bayesian_fusion_norm")
-    clusters    = pipeline.get_data("clusters")
-    centroids   = pipeline.get_data("centroids")
+    historical_data = pipeline.get_data("historical_data")  # Historical draw records used for labels and prefix stats
+    if not historical_data:  # If missing/empty history, cannot train anything meaningful
+        pipeline.add_data(
+            "deep_learning_predictions",  # Stores result into pipeline
+            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL  # Uniform fallback (no information)
+        )
+        return  # Exit early
 
-    required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
-    if any(v is None for v in required):
-        logging.error("Deep learning aborted: missing required pipeline features.")
-        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL)
-        return
+    monte_carlo = pipeline.get_data("monte_carlo")  # Probabilities from Monte Carlo stage
+    redundancy  = pipeline.get_data("redundancy")  # Probabilities from redundancy/coverage stage
+    markov      = pipeline.get_data("markov_features")  # Probabilities from Markov stage
+    entropy     = pipeline.get_data("entropy_features")  # Probabilities from entropy stage
+    fusion_norm = pipeline.get_data("bayesian_fusion_norm")  # Bayesian fused and normalised probabilities
+    clusters    = pipeline.get_data("clusters")  # Cluster assignment vector (per number)
+    centroids   = pipeline.get_data("centroids")  # Centroid-related vector (per number)
 
-    # ---------------- Step 2: Build strict binary labels ---------------- #
+    required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]  # All required inputs
+    if any(v is None for v in required):  # Abort if any upstream feature missing
+        logging.error("Deep learning aborted: missing required pipeline features.")  # Emit diagnostics
+        pipeline.add_data(
+            "deep_learning_predictions",  # Store fallback into pipeline
+            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL  # Uniform fallback
+        )
+        return  # Exit early
 
-    labels = []
-    for draw in historical_data:
-        y = np.zeros(NUM_TOTAL, dtype=float)
+    # ---------- Step 2: Build strict multi-hot labels ---------- #
 
-        for n in draw.get("numbers", []):
-            if isinstance(n, int) and 1 <= n <= NUM_MAIN:
-                y[n - 1] = 1.0
+    labels = []  # Will hold one 50-dim multi-hot vector per historical draw
 
-        pb = draw.get("powerball")
-        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:
-            y[NUM_MAIN + pb - 1] = 1.0
-        elif isinstance(pb, (list, tuple)):
-            for p in pb:
-                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:
-                    y[NUM_MAIN + p - 1] = 1.0
+    for draw in historical_data:  # Iterates over draw dicts
+        y = np.zeros(NUM_TOTAL, dtype=float)  # Allocates empty label vector
 
-        labels.append(y)
+        # Main numbers (1–40)
+        for n in draw.get("numbers", []):  # Pulls main number list; default empty
+            if isinstance(n, int) and 1 <= n <= NUM_MAIN:  # Validate as integer and in range
+                y[n - 1] = 1.0  # Converts 1-based lotto number to 0-based index
 
-    Y = np.asarray(labels, dtype=float)
-    n_draws = Y.shape[0]
-    if n_draws < 10:
-        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL)
-        return
+        # Powerball (1–10)
+        pb = draw.get("powerball")  # Reads powerball field
+        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:  # Single powerball integer
+            y[NUM_MAIN + pb - 1] = 1.0  # Map to indices 40..49 (0-based)
+        elif isinstance(pb, (list, tuple)):  # Some sources may store multiple PBs
+            for p in pb:  # Iterates PB list/tuple
+                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:  # Validate range
+                    y[NUM_MAIN + p - 1] = 1.0  # Set PB index as active
 
-    # ---------------- Step 3: Normalize pipe vectors ---------------- #
+        labels.append(y)  # Stores label vector for this draw
 
-    mc = _safe_norm_vec(monte_carlo, "monte_carlo")
-    rd = _safe_norm_vec(redundancy,  "redundancy")
-    mk = _safe_norm_vec(markov,      "markov_features")
-    en = _safe_norm_vec(entropy,     "entropy_features")
-    fn = _safe_norm_vec(fusion_norm, "bayesian_fusion_norm")
+    Y = np.asarray(labels, dtype=float)  # Stack labels into shape (n_draws, 50)
+    n_draws = Y.shape[0]  # Number of historical examples available
 
-    clusters = np.asarray(clusters, dtype=float).ravel()
-    centroids = np.asarray(centroids, dtype=float).ravel()
+    if n_draws < 10:  # Too little data to reasonably train
+        pipeline.add_data(
+            "deep_learning_predictions",  # Store fallback
+            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL  # Uniform distribution
+        )
+        return  # Exit early
 
-    if clusters.size != NUM_TOTAL:
-        clusters = np.zeros(NUM_TOTAL, dtype=float)
-    if centroids.size != NUM_TOTAL:
-        centroids = np.zeros(NUM_TOTAL, dtype=float)
+    # ---------- Step 3: Normalise pipeline vectors ---------- #
+    #Each one snsures valid probability vectors
+    mc = _prob_norm_vec(monte_carlo, "monte_carlo")  
+    rd = _prob_norm_vec(redundancy,  "redundancy")  
+    mk = _prob_norm_vec(markov,      "markov_features")  
+    en = _prob_norm_vec(entropy,     "entropy_features")  
+    fn = _prob_norm_vec(fusion_norm, "bayesian_fusion_norm")  
 
-    # ---------------- Step 4: Build causal prefix frequency F[t] ---------------- #
+    clusters  = np.asarray(clusters, dtype=float).ravel()  # Force to flat float vector
+    centroids = np.asarray(centroids, dtype=float).ravel()  # Force to flat float vector
 
-    F = np.zeros((n_draws, NUM_TOTAL), dtype=float)
-    counts = np.zeros(NUM_TOTAL, dtype=float)
+    if clusters.size != NUM_TOTAL:  # If wrong size, discard rather than misalign features
+        clusters = np.zeros(NUM_TOTAL, dtype=float)  # Replace with zeros to preserve dimensions
+    if centroids.size != NUM_TOTAL:  # If wrong size, discard rather than misalign features
+        centroids = np.zeros(NUM_TOTAL, dtype=float)  # Replace with zeros to preserve dimensions
 
-    for t in range(n_draws):
-        s = counts.sum()
-        F[t] = counts / s if s > 0 else np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL
+    # ---------- Step 4: Build causal prefix frequencies ---------- #
 
-        for n in historical_data[t].get("numbers", []):
-            if isinstance(n, int) and 1 <= n <= NUM_MAIN:
-                counts[n - 1] += 1.0
+    F = np.zeros((n_draws, NUM_TOTAL), dtype=float)  # One frequency vector per timestep (before seeing that draw)
+    counts = np.zeros(NUM_TOTAL, dtype=float)  # Running occurrence counts up to time t-1
 
-        pb = historical_data[t].get("powerball")
-        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:
-            counts[NUM_MAIN + pb - 1] += 1.0
-        elif isinstance(pb, (list, tuple)):
-            for p in pb:
-                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:
-                    counts[NUM_MAIN + p - 1] += 1.0
+    for t in range(n_draws):  # Walk forward through history
+        s = counts.sum()  # Total counts so far
+        F[t] = counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL  # Convert counts to frequencies or uniform
 
-    # ---------------- Step 5: Classical features (keeps np.column_stack) ---------------- #
+        for n in historical_data[t].get("numbers", []):  # Adds numbers from the current draw into counts
+            if isinstance(n, int) and 1 <= n <= NUM_MAIN:  # Validate main number
+                counts[n - 1] += 1.0  # Increments main number count
 
-    X = np.column_stack((
-        F * mc.reshape(1, -1),
-        F * rd.reshape(1, -1),
-        F * mk.reshape(1, -1),
-        F * en.reshape(1, -1),
-        F * fn.reshape(1, -1),
-        np.tile(centroids.reshape(1, -1), (n_draws, 1)),
-        np.tile(clusters.reshape(1, -1),  (n_draws, 1)),
-    )).astype(float)
+        pb = historical_data[t].get("powerball")  # Reads powerball for this draw
+        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:  # Single PB integer
+            counts[NUM_MAIN + pb - 1] += 1.0  # Increments PB count
+        elif isinstance(pb, (list, tuple)):  # Multiple PBs
+            for p in pb:  # Iterates PB list/tuple
+                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:  # Validate PB
+                    counts[NUM_MAIN + p - 1] += 1.0  # Increments PB count
 
-    # ---------------- Step 6: Time-aware train/val split ---------------- #
+    # ---------- Step 5: Classical feature matrix ---------- #
 
-    n_val = max(1, int(0.15 * n_draws))
-    X_train, X_val = X[:-n_val], X[-n_val:]
-    Y_train, Y_val = Y[:-n_val], Y[-n_val:]
+    X = np.column_stack((  # Concatenate feature blocks horizontally
+        F * mc.reshape(1, -1),  # Prefix frequencies reweighted by Monte Carlo probabilities
+        F * rd.reshape(1, -1),  # Prefix frequencies reweighted by redundancy probabilities
+        F * mk.reshape(1, -1),  # Prefix frequencies reweighted by Markov probabilities
+        F * en.reshape(1, -1),  # Prefix frequencies reweighted by entropy probabilities
+        F * fn.reshape(1, -1),  # Prefix frequencies reweighted by Bayesian fused probabilities
+        np.tile(centroids.reshape(1, -1), (n_draws, 1)),  # Repeat centroids across all timesteps
+        np.tile(clusters.reshape(1, -1),  (n_draws, 1)),  # Repeat clusters across all timesteps
+    )).astype(float)  # Ensure float dtype for downstream models
 
-    # ---------------- Step 7: GLOBAL class weights ---------------- #
+    # ---------- Step 6: Time-aware train/validation split ---------- #
 
-    pos = Y_train.sum(axis=0)
-    neg = Y_train.shape[0] - pos
-    cw = neg / (pos + MIN_PROB)
-    cw = np.clip(cw, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT).astype(np.float32)
+    n_val = max(1, int(0.15 * n_draws))  # Validation is the last ~15% of history (at least 1)
+    X_train, X_val = X[:-n_val], X[-n_val:]  # Train on early history, validate on most recent history
+    Y_train, Y_val = Y[:-n_val], Y[-n_val:]  # Same split for labels
 
-    class_weights = cw
-    class_weights_tf = tf.constant(class_weights, dtype=tf.float32)
+    # ---------- Step 7: Compute global class weights ---------- #
 
-    # ---------------- Step 8: Quantum encoder (train only) ---------------- #
+    pos = Y_train.sum(axis=0)  # Positive counts per class across training set
+    neg = Y_train.shape[0] - pos  # Negative counts per class
+
+    cw = neg / (pos + MIN_PROB)  # Ratio-based positive class weight (avoid div-by-zero)
+    cw = np.clip(cw, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT).astype(np.float32)  # Clamp to keep gradients sane
+
+    class_weights = cw  # Store NumPy version globally
+    class_weights_tf = tf.constant(class_weights, dtype=tf.float32)  # Store TF constant for loss function
+
+    # ---------- Step 8: Train quantum encoder + reset kernel cache ---------- #
 
     try:
-        train_quantum_encoder(X_train, Y_train)
-        logging.info("Quantum encoder training complete.")
+        train_quantum_encoder(X_train, Y_train)  # Fit/tune the quantum encoder using training data only
+        logging.info("Quantum encoder training complete.")  # Confirm completion
     except Exception as e:
-        logging.warning(f"Quantum encoder training failed: {e}")
+        logging.warning(f"Quantum encoder training failed: {e}")  # Continue even if quantum training fails
 
-    # ---------------- Step 9: Compute quantum + kernel with HARD width contract ---------------- #
+    _reset_quantum_kernel_cache()  # Ensure kernel prototypes are rebuilt under latest encoder weights
+
+    # ---------- Step 9: Compute quantum and kernel features ---------- #
 
     try:
-        Q_train = _force_width(compute_quantum_matrix(X_train), QUANTUM_FEATURE_LEN, "Q_train")
-        Q_val   = _force_width(compute_quantum_matrix(X_val),   QUANTUM_FEATURE_LEN, "Q_val")
+        Q_train = _force_width(  # Ensure quantum feature matrix has fixed width
+            compute_quantum_matrix(X_train),  # Quantum feature extraction on training matrix
+            QUANTUM_FEATURE_LEN,  # Expected width from quantum feature extractor
+            "Q_train"  # Name used for error messages
+        )
+        Q_val = _force_width(  # Ensure quantum feature matrix has fixed width
+            compute_quantum_matrix(X_val),  # Quantum feature extraction on validation matrix
+            QUANTUM_FEATURE_LEN,  # Expected width from quantum feature extractor
+            "Q_val"  # Name used for error messages
+        )
     except Exception as e:
-        logging.error(f"Quantum feature computation failed: {e}")
-        Q_train = np.zeros((X_train.shape[0], QUANTUM_FEATURE_LEN), dtype=float)
-        Q_val   = np.zeros((X_val.shape[0],   QUANTUM_FEATURE_LEN), dtype=float)
+        logging.error(f"Quantum feature computation failed: {e}")  # Report quantum feature failure
+        Q_train = np.zeros((X_train.shape[0], QUANTUM_FEATURE_LEN))  # Fallback to zeros with correct shape
+        Q_val   = np.zeros((X_val.shape[0],   QUANTUM_FEATURE_LEN))  # Fallback to zeros with correct shape
 
     try:
-        # IMPORTANT: call with keywords so signature mismatches can’t silently break widths
-        K_train_raw = build_quantum_kernel_features(X_train, num_prototypes=KERNEL_PROTOTYPES, seed=1337)
-        K_val_raw   = build_quantum_kernel_features(X_val,   num_prototypes=KERNEL_PROTOTYPES, seed=1337)
+        # Prototypes anchored to TRAIN by cache
+        K_train_raw = build_quantum_kernel_features(  # Compute kernel features for training set
+            X_train,  # Use training examples (defines prototype cache)
+            num_prototypes=KERNEL_PROTOTYPES,  # Requested number of prototypes / output width
+            seed=1337  # Deterministic prototype selection/reproducibility
+        )
+        K_val_raw = build_quantum_kernel_features(  # Compute kernel features for validation set
+            X_val,  # Validation examples mapped against same cached prototypes
+            num_prototypes=KERNEL_PROTOTYPES,  # Output width
+            seed=1337  # Seed matches to ensure cache compatibility
+        )
 
-        K_train = _force_width(K_train_raw, KERNEL_PROTOTYPES, "K_train")
-        K_val   = _force_width(K_val_raw,   KERNEL_PROTOTYPES, "K_val")
+        K_train = _force_width(K_train_raw, KERNEL_PROTOTYPES, "K_train")  # Enforce fixed width on training kernel feats
+        K_val   = _force_width(K_val_raw,   KERNEL_PROTOTYPES, "K_val")  # Enforce fixed width on validation kernel feats
     except Exception as e:
-        logging.error(f"Kernel feature computation failed: {e}")
-        K_train = np.zeros((X_train.shape[0], KERNEL_PROTOTYPES), dtype=float)
-        K_val   = np.zeros((X_val.shape[0],   KERNEL_PROTOTYPES), dtype=float)
+        logging.error(f"Kernel feature computation failed: {e}")  # Report kernel feature failure
+        K_train = np.zeros((X_train.shape[0], KERNEL_PROTOTYPES))  # Fallback zero kernel features (train)
+        K_val   = np.zeros((X_val.shape[0],   KERNEL_PROTOTYPES))  # Fallback zero kernel features (val)
 
-    Xf_train = np.column_stack((X_train, Q_train, K_train)).astype(float)
-    Xf_val   = np.column_stack((X_val,   Q_val,   K_val)).astype(float)
+    Xf_train = np.column_stack((X_train, Q_train, K_train)).astype(float)  # Fuse classical + quantum + kernel (train)
+    Xf_val   = np.column_stack((X_val,   Q_val,   K_val)).astype(float)  # Fuse classical + quantum + kernel (val)
 
-    input_dim = Xf_train.shape[1]
+    input_dim = Xf_train.shape[1]  # Store final fused feature width for model input validation
 
-    # ---------------- Step 10: Augment TRAIN ONLY ---------------- #
+    # ---------- Step 10: Train-only data augmentation ---------- #
 
-    Xa = [Xf_train]
-    Ya = [Y_train]
+    Xa = [Xf_train]  # List of training matrices to stack (original + noisy versions)
+    Ya = [Y_train]  # Labels duplicated for each augmented copy
 
-    for _ in range(DATA_AUGMENTATION_ROUNDS):
-        Xa.append(Xf_train + np.random.normal(0.0, NOISE_STDDEV, Xf_train.shape))
-        Ya.append(Y_train)
+    for _ in range(DATA_AUGMENTATION_ROUNDS):  # Generate multiple noisy copies of training data
+        Xa.append(Xf_train + np.random.normal(0.0, NOISE_STDDEV, Xf_train.shape))  # Add Gaussian noise in feature space
+        Ya.append(Y_train)  # Keep labels unchanged (noise is only on features)
 
-    Xa = np.vstack(Xa).astype(float)
-    Ya = np.vstack(Ya).astype(float)
+    Xa = np.vstack(Xa).astype(float)  # Stack augmented training matrices vertically
+    Ya = np.vstack(Ya).astype(float)  # Stack labels to match augmented rows
 
-    # ---------------- Step 11: Model ---------------- #
+    # ---------- Step 11: Model definition ---------- #
 
-    model = keras.Sequential([
-        keras.layers.Input(shape=(input_dim,)),
-        keras.layers.Dense(256, activation="relu"),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.4),
-        keras.layers.Dense(128, activation="relu"),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.3),
-        keras.layers.Dense(64, activation="relu"),
-        keras.layers.Dense(NUM_TOTAL, activation="sigmoid"),
+    model = keras.Sequential([  # Simple feedforward network for tabular fused features
+        keras.layers.Input(shape=(input_dim,)),  # Define input layer shape explicitly
+
+        keras.layers.Dense(256, activation="relu"),  # First dense layer
+        keras.layers.BatchNormalization(),  # BatchNorm to stabilise hidden activations
+
+        keras.layers.Dense(256, activation="relu"),  # Second dense layer
+        keras.layers.BatchNormalization(),  # BatchNorm again
+
+        keras.layers.Dense(128, activation="relu"),  # Third dense layer
+
+        keras.layers.Dense(NUM_TOTAL, activation="sigmoid"),  # Output layer: independent probs per class (multi-label)
     ])
 
     model.compile(
-        optimizer=keras.optimizers.Adam(1e-3),
-        loss=weighted_bce,
+        optimizer=keras.optimizers.Adam(learning_rate=2e-3),  # Adam optimiser with moderately high LR
+        loss=weighted_bce,  # Custom weighted BCE loss defined above
         metrics=[
-            keras.metrics.AUC(multi_label=True, num_labels=NUM_TOTAL, name="auc"),
-            keras.metrics.BinaryAccuracy(name="bin_acc"),
-            keras.metrics.MeanAbsoluteError(name="mae"),
+            keras.metrics.AUC(  # Multi-label AUC as a broad ranking sanity metric
+                multi_label=True,  # Treat each output independently
+                num_labels=NUM_TOTAL,  # Total labels = 50
+                name="auc"  # Metric name in logs
+            ),
+            keras.metrics.BinaryAccuracy(name="bin_acc"),  # Thresholded accuracy (coarse, but stable)
+            keras.metrics.MeanAbsoluteError(name="mae"),  # MAE across probabilities vs labels
         ],
     )
 
-    # ---------------- Step 12: Train ---------------- #
+    # ---------- Step 12: Training ---------- #
 
     model.fit(
-        Xa, Ya,
-        epochs=EPOCH_SIZE,
-        batch_size=BATCH_SIZE,
-        validation_data=(Xf_val, Y_val),
+        Xa,  # Augmented training features
+        Ya,  # Augmented training labels
+        epochs=EPOCH_SIZE,  # Total epochs
+        batch_size=BATCH_SIZE,  # Batch size
+        validation_data=(Xf_val, Y_val),  # Validation uses clean (non-augmented) fused features
         callbacks=[
-            keras.callbacks.ReduceLROnPlateau(
-                monitor="val_auc",
-                mode="max",
-                factor=0.7,
-                patience=6,
-                min_lr=1e-6,
-                verbose=1,
+            keras.callbacks.ReduceLROnPlateau(  # Reduce LR if validation loss plateaus
+                monitor="val_loss",  # Track validation loss
+                mode="min",  # Lower is better
+                factor=0.8,  # Multiply LR by this factor
+                patience=12,  # Wait this many epochs without improvement
+                min_lr=5e-6,  # Do not reduce below this LR
+                verbose=1,  # Print updates
             ),
-            keras.callbacks.EarlyStopping(
-                monitor="val_auc",
-                mode="max",
-                patience=10,
-                restore_best_weights=True,
-                verbose=1,
+            keras.callbacks.EarlyStopping(  # Stop training if validation loss stops improving
+                monitor="val_loss",  # Track validation loss
+                mode="min",  # Lower is better
+                patience=25,  # Stop after this many stagnant epochs
+                min_delta=1e-4,  # Require meaningful improvement
+                restore_best_weights=True,  # Roll back to best model
+                verbose=1,  # Print stop reason
             ),
-            EpochLogger(),
+            EpochLogger(),  # Custom logger callback (your project-specific logging)
         ],
-        verbose=1,
+        verbose=1,  # Show training progress
     )
 
-    # ---------------- Step 13: Inference (MUST MATCH TRAIN WIDTH) ---------------- #
+    # ---------- Step 13: Inference ---------- #
 
-    f_now = F[-1].reshape(1, -1).astype(float)
+    # Use post-history frequency (counts AFTER last draw)
+    s = counts.sum()  # Total counts after processing all historical draws
+    f_now = (  # Construct current frequency vector
+        counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL  # Normalised counts or uniform fallback
+    ).reshape(1, -1).astype(float)  # Convert to row vector for feature construction
 
-    x_now = np.column_stack((
-        f_now * mc.reshape(1, -1),
-        f_now * rd.reshape(1, -1),
-        f_now * mk.reshape(1, -1),
-        f_now * en.reshape(1, -1),
-        f_now * fn.reshape(1, -1),
-        centroids.reshape(1, -1),
-        clusters.reshape(1, -1),
-    )).astype(float)
+    x_now = np.column_stack((  # Build current classical feature row in the same structure as training X
+        f_now * mc.reshape(1, -1),  # Frequency weighted by Monte Carlo
+        f_now * rd.reshape(1, -1),  # Frequency weighted by redundancy
+        f_now * mk.reshape(1, -1),  # Frequency weighted by Markov
+        f_now * en.reshape(1, -1),  # Frequency weighted by entropy
+        f_now * fn.reshape(1, -1),  # Frequency weighted by Bayesian fusion
+        centroids.reshape(1, -1),  # Static centroid features
+        clusters.reshape(1, -1),  # Static cluster features
+    )).astype(float)  # Ensure float dtype
 
-    # Enforce same widths as train
     try:
-        q_now = _force_width(compute_quantum_matrix(x_now), QUANTUM_FEATURE_LEN, "q_now")
+        q_now = _force_width(  # Ensure quantum feature width matches training expectation
+            compute_quantum_matrix(x_now),  # Compute quantum features for current row
+            QUANTUM_FEATURE_LEN,  # Expected width
+            "q_now"  # Name for diagnostics
+        )
     except Exception:
-        q_now = np.zeros((1, QUANTUM_FEATURE_LEN), dtype=float)
+        q_now = np.zeros((1, QUANTUM_FEATURE_LEN))  # Fallback to zeros if quantum feature step fails
 
     try:
-        k_now_raw = build_quantum_kernel_features(x_now, num_prototypes=KERNEL_PROTOTYPES, seed=1337)
-        k_now = _force_width(k_now_raw, KERNEL_PROTOTYPES, "k_now")
+        k_now_raw = build_quantum_kernel_features(  # Compute kernel features for current row
+            x_now,  # Current classical features
+            num_prototypes=KERNEL_PROTOTYPES,  # Output width
+            seed=1337  # Seed must match cache semantics used earlier
+        )
+        k_now = _force_width(k_now_raw, KERNEL_PROTOTYPES, "k_now")  # Enforce fixed kernel feature width
     except Exception:
-        k_now = np.zeros((1, KERNEL_PROTOTYPES), dtype=float)
+        k_now = np.zeros((1, KERNEL_PROTOTYPES))  # Fallback to zeros if kernel step fails
 
-    xf_now = np.column_stack((x_now, q_now, k_now)).astype(float)
+    xf_now = np.column_stack((x_now, q_now, k_now)).astype(float)  # Fuse classical + quantum + kernel for inference
 
-    if xf_now.shape[1] != input_dim:
-        logging.error(f"Inference width mismatch: got {xf_now.shape[1]}, expected {input_dim}. Using uniform fallback.")
-        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL)
-        return
+    if xf_now.shape[1] != input_dim:  # Hard check: inference feature width must match model input width
+        logging.error(
+            f"Inference width mismatch: got {xf_now.shape[1]}, expected {input_dim}"  # Log exact mismatch
+        )
+        pipeline.add_data(
+            "deep_learning_predictions",  # Store fallback result
+            np.ones(NUM_TOTAL) / NUM_TOTAL  # Uniform fallback
+        )
+        return  # Exit early to avoid invalid model input
 
     try:
-        dl_pred = model.predict(xf_now, verbose=0).reshape(-1).astype(float)
+        dl_pred = model.predict(xf_now, verbose=0).reshape(-1).astype(float)  # Run prediction and flatten to (50,)
     except Exception as e:
-        logging.error(f"DL inference failed: {e}")
-        pipeline.add_data("deep_learning_predictions", np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL)
-        return
+        logging.error(f"DL inference failed: {e}")  # Report inference failure
+        pipeline.add_data(
+            "deep_learning_predictions",  # Store fallback
+            np.ones(NUM_TOTAL) / NUM_TOTAL  # Uniform fallback
+        )
+        return  # Exit early
 
-    pipeline.add_data("deep_learning_predictions", np.clip(dl_pred, 0.0, 1.0))
-
-
-
-
-
-
-
+    pipeline.add_data(
+        "deep_learning_predictions",  # Store output in pipeline
+        np.clip(dl_pred, 0.0, 1.0)  # Ensure final probabilities are within [0, 1]
+    )
 
