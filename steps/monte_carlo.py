@@ -7,21 +7,22 @@
 ##   Uses Bayesian fusion and clustering to adjust probabilities,
 ##   then simulates draws and returns a shape-(50,) probability vector.
 
-import numpy as np
-import logging
+import numpy as np  # Numerical operations and random sampling
+import logging      # Logging for runtime diagnostics and monitoring
 
+# Configure logging format and default level
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-NUM_MAIN = 40
-NUM_POWERBALL = 10
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL
-NUM_PICK = 6
-CLUSTER_MULTIPLIER = 1.2
-MIN_PROBABILITY = 1e-8
+NUM_MAIN = 40            # Total possible main numbers
+NUM_POWERBALL = 10       # Total possible Powerball numbers
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL  # Combined vector length (50)
+NUM_PICK = 6             # Number of main numbers drawn per ticket line
+CLUSTER_MULTIPLIER = 1.2 # Base weight applied to clustering influence
+MIN_PROBABILITY = 1e-8   # Ensures probabilities never become zero (avoids dead categories)
 ENABLE_RANDOM_SEED = True
-RANDOM_SEED = 42
+RANDOM_SEED = 42         # Fixed seed for reproducibility if enabled
 
-# Seed ONCE (optional reproducibility). Do NOT reseed inside simulation loops.
+# Seed ONCE globally for reproducibility (never reseed inside loops)
 if ENABLE_RANDOM_SEED:
     np.random.seed(RANDOM_SEED)
 
@@ -30,110 +31,94 @@ def compute_mc_sims(num_draws: int) -> int:
     """
     Dynamic Monte Carlo simulation count that scales linearly with the
     amount of historical data.
-
-    Original behavior (before the cap):
-        base = num_draws * 50
-        mc_sims = base * 1.5 = num_draws * 75
-
-    We preserve that linear growth, enforce only a minimum,
-    and remove the artificial upper cap so it keeps growing
-    as the dataset grows (e.g., ~+75 sims per extra draw).
     """
-    base = num_draws * 50
-    mc_sims = int(max(base * 1.5, 1000))  # at least 1000, then 75 * num_draws
-    return mc_sims
+    base = num_draws * 50                  # Base scaling proportional to dataset size
+    mc_sims = int(max(base * 1.5, 1000))   # Ensure at least 1000 simulations
+    return mc_sims                        # Return number of simulations to run
 
 
 def adjust_probabilities(fusion_probs, centroids, clusters):
     """
     Adjust probabilities using Bayesian fusion + clustering.
-    This is the OG stable logic, applied domain-local (main or powerball).
     """
-    fusion_probs = np.asarray(fusion_probs, dtype=float)
-    centroids = np.asarray(centroids, dtype=float)
-    clusters = np.asarray(clusters, dtype=int)
+    fusion_probs = np.asarray(fusion_probs, dtype=float)  # Ensure float array
+    centroids = np.asarray(centroids, dtype=float)        # Cluster centroid strengths
+    clusters = np.asarray(clusters, dtype=int)            # Cluster assignment per number
 
-    weights = CLUSTER_MULTIPLIER + centroids[clusters]
-    out = fusion_probs * weights
+    weights = CLUSTER_MULTIPLIER + centroids[clusters]    # Compute cluster-based weight per number
+    out = fusion_probs * weights                          # Apply weight to fusion probabilities
 
-    # Ensure strictly positive support, then normalize.
-    out = np.clip(out, MIN_PROBABILITY, None)
-    s = out.sum()
-    if s <= 0 or not np.isfinite(s):
+    out = np.clip(out, MIN_PROBABILITY, None)             # Prevent zeros
+    s = out.sum()                                         # Sum for normalization
+    if s <= 0 or not np.isfinite(s):                      # Safety fallback
         return np.ones_like(out) / len(out)
-    out /= s
-    return out
+    out /= s                                              # Normalize to sum 1
+    return out                                            # Return adjusted distribution
 
 
 def run_main_simulations(numbers_prob, mc_sims):
     """Monte Carlo draws of NUM_PICK main numbers per simulation."""
-    numbers_prob = np.asarray(numbers_prob, dtype=float)
-    numbers = np.arange(1, NUM_MAIN + 1)
+    numbers_prob = np.asarray(numbers_prob, dtype=float)  # Ensure float probabilities
+    numbers = np.arange(1, NUM_MAIN + 1)                  # Possible numbers 1..40
 
-    picks_matrix = np.empty((mc_sims, NUM_PICK), dtype=int)
-    for i in range(mc_sims):
-        picks_matrix[i] = np.random.choice(
+    picks_matrix = np.empty((mc_sims, NUM_PICK), dtype=int)  # Storage for all simulations
+    for i in range(mc_sims):                                 # Repeat simulation mc_sims times
+        picks_matrix[i] = np.random.choice(                   # Random draw
             numbers,
             size=NUM_PICK,
-            replace=False,
-            p=numbers_prob
+            replace=False,                                    # Lotto rule: no duplicates per line
+            p=numbers_prob                                    # Probability-weighted sampling
         )
-    return picks_matrix.flatten()
+    return picks_matrix.flatten()                             # Flatten for frequency counting
 
 
 def run_powerball_simulations(power_prob, mc_sims):
-    """Monte Carlo draws of 1 Powerball per simulation (with replacement)."""
-    power_prob = np.asarray(power_prob, dtype=float)
-    numbers = np.arange(1, NUM_POWERBALL + 1)
+    """Monte Carlo draws of 1 Powerball per simulation."""
+    power_prob = np.asarray(power_prob, dtype=float)        # Ensure float probabilities
+    numbers = np.arange(1, NUM_POWERBALL + 1)               # Possible PB numbers 1..10
     picks = np.random.choice(
         numbers,
         size=mc_sims,
-        replace=True,
+        replace=True,                                       # PB is independent per line
         p=power_prob
     )
-    return picks
+    return picks                                            # Return drawn PB numbers
 
 
 def calculate_distribution(picks_array, num_total):
     """
-    Counts occurrences and returns a normalized probability distribution
-    over 1..num_total, with MIN_PROBABILITY floor applied *before* the
-    final normalization so the result is a proper probability vector.
+    Convert simulated picks into a probability distribution.
     """
-    picks_array = np.asarray(picks_array, dtype=int)
-    counts = np.bincount(picks_array - 1, minlength=num_total)
+    picks_array = np.asarray(picks_array, dtype=int)        # Ensure integer picks
+    counts = np.bincount(picks_array - 1, minlength=num_total)  # Count occurrences
 
     total = counts.sum()
-    if total <= 0:
-        # Fallback: no counts (should not happen in practice)
+    if total <= 0:                                          # Safety fallback
         return np.ones(num_total, dtype=float) / num_total
 
     dist = counts.astype(float)
-    dist = np.clip(dist, MIN_PROBABILITY, None)
-    dist /= dist.sum()
+    dist = np.clip(dist, MIN_PROBABILITY, None)             # Ensure no zero bins
+    dist /= dist.sum()                                      # Normalize to probability distribution
     return dist
 
 
 def monte_carlo_simulation(pipeline):
     """
-    Runs Monte Carlo simulation using Bayesian fusion and clustering (main + Powerball).
-    Produces a unified shape (50,) vector stored as pipeline["monte_carlo"].
+    Main Monte Carlo driver. Produces pipeline["monte_carlo"].
     """
 
-    historical_data = pipeline.get_data("historical_data")
-    if not historical_data:
+    historical_data = pipeline.get_data("historical_data")  # Retrieve historical draws
+    if not historical_data:                                 # If no history
         logging.warning("No historical data available for Monte Carlo simulation.")
         pipeline.add_data("monte_carlo", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
-    # Dynamic simulation count (fully dynamic with dataset size)
-    num_draws = len(historical_data)
-    mc_sims = compute_mc_sims(num_draws)
+    num_draws = len(historical_data)                        # Count historical draws
+    mc_sims = compute_mc_sims(num_draws)                    # Determine simulation count
 
-    # Retrieve Bayesian fusion (shape 50) and clustering
-    fusion_50 = pipeline.get_data("bayesian_fusion")
-    clusters = pipeline.get_data("clusters")
-    centroids = pipeline.get_data("centroids")
+    fusion_50 = pipeline.get_data("bayesian_fusion")        # Base probabilities from fusion stage
+    clusters = pipeline.get_data("clusters")                # Cluster assignments
+    centroids = pipeline.get_data("centroids")              # Cluster centroid strengths
 
     if fusion_50 is None or clusters is None or centroids is None:
         logging.warning("Fusion/clustering data missing. Using uniform distribution.")
@@ -144,7 +129,7 @@ def monte_carlo_simulation(pipeline):
     clusters = np.array(clusters, dtype=int)
     centroids = np.array(centroids, dtype=float)
 
-    # Slice arrays for main and Powerball
+    # Split main vs Powerball
     fusion_main = fusion_50[:NUM_MAIN]
     fusion_power = fusion_50[NUM_MAIN:]
 
@@ -154,19 +139,19 @@ def monte_carlo_simulation(pipeline):
     clusters_power = clusters[NUM_MAIN:]
     centroids_power = centroids[NUM_MAIN:]
 
-    # Adjust probabilities using fusion + clustering (domain-local)
+    # Adjust probabilities per domain
     prob_main = adjust_probabilities(fusion_main, centroids_main, clusters_main)
     prob_power = adjust_probabilities(fusion_power, centroids_power, clusters_power)
 
-    # Run Monte Carlo for main numbers
+    # Simulate main draws
     main_picks = run_main_simulations(prob_main, mc_sims)
     monte_carlo_main = calculate_distribution(main_picks, NUM_MAIN)
 
-    # Run Monte Carlo for Powerball
+    # Simulate Powerball draws
     power_picks = run_powerball_simulations(prob_power, mc_sims)
     monte_carlo_power = calculate_distribution(power_picks, NUM_POWERBALL)
 
-    # Combine (shape 50), normalize once more for safety
+    # Combine into one vector of length 50
     combined = np.concatenate((monte_carlo_main, monte_carlo_power)).astype(float)
     s = combined.sum()
     if s <= 0 or not np.isfinite(s):
@@ -174,8 +159,9 @@ def monte_carlo_simulation(pipeline):
     else:
         combined /= s
 
-    pipeline.add_data("monte_carlo", combined)
+    pipeline.add_data("monte_carlo", combined)  # Store result in pipeline
     logging.info(f"Monte Carlo simulation completed with {mc_sims} simulations.")
+
 
 
 

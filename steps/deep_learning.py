@@ -408,32 +408,35 @@ def deep_learning_prediction(pipeline):
     # ---------- Step 12: Training ---------- #
 
     model.fit(
-        Xa,  # Augmented training features
-        Ya,  # Augmented training labels
-        epochs=EPOCH_SIZE,  # Total epochs
-        batch_size=BATCH_SIZE,  # Batch size
+        Xa,  # Augmented training feature matrix (original + noisy copies)
+        Ya,  # Augmented training labels (duplicated to match Xa)
+        epochs=EPOCH_SIZE,  # Maximum number of training epochs (upper bound)
+        batch_size=BATCH_SIZE,  # Mini-batch size per gradient update step
         validation_data=(Xf_val, Y_val),  # Validation uses clean (non-augmented) fused features
         callbacks=[
-            keras.callbacks.ReduceLROnPlateau(  # Reduce LR if validation loss plateaus
-                monitor="val_loss",  # Track validation loss
-                mode="min",  # Lower is better
-                factor=0.8,  # Multiply LR by this factor
-                patience=12,  # Wait this many epochs without improvement
-                min_lr=5e-6,  # Do not reduce below this LR
-                verbose=1,  # Print updates
+            keras.callbacks.ReduceLROnPlateau(
+                # Reduce learning rate if validation AUC stops improving
+                monitor="val_auc",  # Watch validation AUC (ranking quality proxy)
+                mode="max",  
+                factor=0.7,  # Multiplys LR by this factor when plateau detected
+                patience=8,  # Epochs to wait with no improvement before reducing LR
+                min_lr=5e-6,  # Lower bound on learning rate
+                verbose=1,  # Prints when LR is reduced
             ),
-            keras.callbacks.EarlyStopping(  # Stop training if validation loss stops improving
-                monitor="val_loss",  # Track validation loss
-                mode="min",  # Lower is better
-                patience=25,  # Stop after this many stagnant epochs
-                min_delta=1e-4,  # Require meaningful improvement
-                restore_best_weights=True,  # Roll back to best model
-                verbose=1,  # Print stop reason
+            keras.callbacks.EarlyStopping(
+                # Stops training once validation AUC stops improving
+                monitor="val_auc",  # Uses val_auc instead of val_loss (AUC better matches ranking objective)
+                mode="max",  # Higher AUC is better
+                patience=15,  # Epochs to wait with no improvement before stopping training
+                min_delta=0.001,  # Minimum improvement required to reset patience
+                restore_best_weights=True,  # Restores model weights from best epoch by val_auc
+                verbose=1,  # Print stop reason + restored epoch
             ),
-            EpochLogger(),  # Custom logger callback (your project-specific logging)
+            EpochLogger(),  # Custom callback (your project-specific epoch log formatting)
         ],
-        verbose=1,  # Show training progress
+        verbose=1,  # Prints training progress per epoch
     )
+
 
     # ---------- Step 13: Inference ---------- #
 
@@ -498,4 +501,5 @@ def deep_learning_prediction(pipeline):
         "deep_learning_predictions",  # Store output in pipeline
         np.clip(dl_pred, 0.0, 1.0)  # Ensure final probabilities are within [0, 1]
     )
+
 
