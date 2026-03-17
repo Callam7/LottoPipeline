@@ -360,6 +360,6 @@ My next focus will be on implementing thorough pytesting for each pipeline step 
 
 Following testing, I will plan on building a comprehensive logging system that captures detailed metrics and stats for every epoch and pipeline execution. These logs will be stored systematically for auditing, debugging, and performance tracking over time.
 
-Finally, we plan to integrate automation that leverages a self-editing model. This model will dynamically adapt the pipeline by analyzing logs and test results, enabling continuous improvement and fine-tuning of prediction accuracy and processing efficiency without manual intervention.
+Finally, I plan to integrate automation that leverages a self-editing model. This model will dynamically adapt the pipeline by analyzing logs and test results, enabling continuous improvement and fine-tuning of prediction accuracy and processing efficiency without manual intervention. Essentially, a algorithm that evolves its own code based on performance. The theory is that as it evolves and changes, it will have improving performance that will eventually reach pin-point accurate prediction capabilities.
 
 ---
