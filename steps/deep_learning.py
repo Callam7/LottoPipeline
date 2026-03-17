@@ -52,7 +52,7 @@ EPOCH_SIZE = 60  # Number of training epochs for the NN
 BATCH_SIZE = 32  # Mini-batch size
 
 # Data augmentation (kept mild to preserve weak structure)
-DATA_AUGMENTATION_ROUNDS = 10  # How many noisy copies of train data to add
+DATA_AUGMENTATION_ROUNDS = 3  # How many noisy copies of train data to add
 NOISE_STDDEV = 0.01  # Noise scale applied to features (not labels)
 
 # Class-weight bounds (prevents gradient saturation)
@@ -380,19 +380,21 @@ def deep_learning_prediction(pipeline):
     model = keras.Sequential([  # Simple feedforward network for tabular fused features
         keras.layers.Input(shape=(input_dim,)),  # Define input layer shape explicitly
 
-        keras.layers.Dense(256, activation="relu"),  # First dense layer
+        keras.layers.Dense(128, activation="relu"),  # First dense layer
         keras.layers.BatchNormalization(),  # BatchNorm to stabilise hidden activations
+        keras.layers.Dropout(0.25),  # Prevent memorising historical draws
 
-        keras.layers.Dense(256, activation="relu"),  # Second dense layer
+        keras.layers.Dense(64, activation="relu"),  # Second dense layer
         keras.layers.BatchNormalization(),  # BatchNorm again
+        keras.layers.Dropout(0.25),  # Regularisation
 
-        keras.layers.Dense(128, activation="relu"),  # Third dense layer
+        keras.layers.Dense(32, activation="relu"),  # Third dense layer
 
         keras.layers.Dense(NUM_TOTAL, activation="sigmoid"),  # Output layer: independent probs per class (multi-label)
     ])
 
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=2e-3),  # Adam optimiser with moderately high LR
+        optimizer=keras.optimizers.Adam(learning_rate=8e-4, clipnorm=1.0),  # Adam optimiser with moderately high LR
         loss=weighted_bce,  # Custom weighted BCE loss defined above
         metrics=[
             keras.metrics.AUC(  # Multi-label AUC as a broad ranking sanity metric
@@ -428,7 +430,7 @@ def deep_learning_prediction(pipeline):
                 monitor="val_auc",  # Uses val_auc instead of val_loss (AUC better matches ranking objective)
                 mode="max",  # Higher AUC is better
                 patience=15,  # Epochs to wait with no improvement before stopping training
-                min_delta=0.001,  # Minimum improvement required to reset patience
+                min_delta=0.0003,  # Minimum improvement required to reset patience
                 restore_best_weights=True,  # Restores model weights from best epoch by val_auc
                 verbose=1,  # Print stop reason + restored epoch
             ),
@@ -499,7 +501,6 @@ def deep_learning_prediction(pipeline):
 
     pipeline.add_data(
         "deep_learning_predictions",  # Store output in pipeline
-        np.clip(dl_pred, 0.0, 1.0)  # Ensure final probabilities are within [0, 1]
+        _prop_norm_vec(np.clip(dl_pred, 0.0, 1.0), "deep_learning_predictions")  # Ensure final probabilities are within [0, 1]
     )
-
 

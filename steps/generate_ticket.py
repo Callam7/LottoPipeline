@@ -1,50 +1,58 @@
 ## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose: Predictive ticket generation using deep_learning_predictions with:
-##   - cross-line penalty (decay)
+##   - soft repetition penalty (usage-based, NOT probabilistic decay)
 ##   - anti-overlap rejection sampling (hard diversity constraint)
+##
+## This module is responsible ONLY for:
+##   - selecting 12 distinct high-likelihood outcomes
+##   - preventing excessive repetition across the ticket
+##   - enforcing hard overlap constraints
 ##
 ## Adaptation notes:
 ##   - For other lotteries: change NUM_MAIN_NUMBERS, NUM_POWERBALLS,
 ##     NUM_PER_LINE, NUM_LINES, and overlap rules.
 
 
-import numpy as np  # Numerical operations + probabilistic sampling
-from data_io import save_current_ticket  # Saves current generated ticket JSON
+import numpy as np                      # Import NumPy for numerical operations and probabilistic sampling
+from data_io import save_current_ticket # Import helper to persist the generated ticket to storage
 
 
 # =========================
 # Ticket configuration
 # =========================
 
-NUM_MAIN_NUMBERS = 40  # Main number pool size (1..40)
-NUM_POWERBALLS = 10    # Powerball pool size (1..10)
-NUM_PER_LINE = 6       # Main numbers per line
-NUM_LINES = 12         # Ticket lines to generate
+NUM_MAIN_NUMBERS = 40   # Total count of possible main numbers (1..40)
+NUM_POWERBALLS = 10     # Total count of possible Powerball numbers (1..10)
+NUM_PER_LINE = 6        # Number of main numbers selected per ticket line
+NUM_LINES = 12          # Total number of ticket lines to generate
 
 
 # =========================
 # Numeric safety
 # =========================
 
-MIN_PROBABILITY = 1e-12  # Prevents zeros -> avoids np.random.choice failure
+MIN_PROBABILITY = 1e-12 # Minimum probability floor to prevent zero-probability sampling failures
 
 
 # =========================
-# Cross-line probability decay
+# Diversity control (USAGE penalty, NOT entropy/decay)
 # =========================
+# These penalties reduce selection likelihood based on how often a number
+# has already appeared across the ticket.
+# They do NOT modify the learned probability distribution itself.
 
-DECAY_MAIN = 0.7       # Multiplicative penalty applied to main numbers after use
-DECAY_POWERBALL = 0.6  # Multiplicative penalty applied to PB after use
+MAIN_USAGE_PENALTY = 0.65  # Multiplicative penalty per prior usage of a main number
+PB_USAGE_PENALTY   = 0.60  # Multiplicative penalty per prior usage of a Powerball
 
 
 # =========================
 # Anti-overlap constraints
 # =========================
 
-MAX_OVERLAP_MAIN = 2         # A new line may overlap <= 2 main numbers with any previous line
-MAX_SAME_POWERBALL = 2       # The same PB number can appear at most this many times
-MAX_RESAMPLE_TRIES = 250     # Cap attempts before fallback (prevents infinite loops)
+MAX_OVERLAP_MAIN = 2       # Maximum allowed shared main numbers with any previous line
+MAX_SAME_POWERBALL = 2     # Maximum number of times a Powerball value may appear
+MAX_RESAMPLE_TRIES = 300   # Maximum attempts to find a valid line before fallback
 
 
 # =========================
@@ -53,24 +61,31 @@ MAX_RESAMPLE_TRIES = 250     # Cap attempts before fallback (prevents infinite l
 
 def safe_norm(x):
     """
-    Normalise probability vector safely.
-    - clips values to MIN_PROBABILITY
-    - returns uniform distribution if sum becomes invalid
+    Safely normalise a probability vector.
+
+    - Clips values to MIN_PROBABILITY to avoid zeros
+    - Returns a uniform distribution if total mass becomes invalid
+
+    This function performs NUMERICAL SAFETY ONLY.
+    It does NOT compute entropy or apply decay.
     """
-    x = np.asarray(x, dtype=float)                   # Ensure float array
-    x = np.clip(x, MIN_PROBABILITY, None)            # Enforce minimum probability
-    s = x.sum()                                      # Sum mass
-    if s <= 0.0:                                     # If invalid mass
-        return np.full_like(x, 1.0 / len(x))         # Uniform fallback
-    return x / s                                     # Normalised probability vector
+
+    x = np.asarray(x, dtype=float)      # Ensure input is a NumPy float array
+    x = np.clip(x, MIN_PROBABILITY, None)  # Enforce minimum probability floor
+    s = x.sum()                         # Compute total probability mass
+
+    if s <= 0.0:                        # Guard against degenerate vectors
+        return np.full_like(x, 1.0 / len(x))  # Fallback to uniform distribution
+
+    return x / s                        # Return properly normalised probabilities
 
 
 def _overlap_count(a, b):
     """
-    Count overlaps between two lists of ints.
-    Used to enforce anti-overlap constraints between ticket lines.
+    Count the number of overlapping values between two lists.
+    Used to enforce diversity constraints between ticket lines.
     """
-    return len(set(a) & set(b))  # Intersection size
+    return len(set(a) & set(b))         # Compute intersection cardinality
 
 
 # =========================
@@ -80,215 +95,157 @@ def _overlap_count(a, b):
 def generate_ticket(pipeline):
     """
     Generate NUM_LINES lottery lines using:
-      - pipeline deep_learning_predictions (only probability source)
-      - cross-line decay (reduces repetition)
-      - anti-overlap rejection sampling (hard diversity constraint)
+      - deep_learning_predictions as the FINAL probability surface
+      - usage-based repetition penalties (diversity control only)
+      - anti-overlap rejection sampling
 
-    Returns:
-      ticket: list[dict] format:
-        [{"line": [...6 numbers...], "powerball": int}, ...]
+    No entropy computation occurs here.
+    No probabilistic decay is applied here.
     """
 
     # ---------------------------------------------
     # Fetch deep learning probability predictions
     # ---------------------------------------------
 
-    predictions = pipeline.get_data("deep_learning_predictions")  # Expected shape = (50,)
-    expected_len = NUM_MAIN_NUMBERS + NUM_POWERBALLS              # Total outputs expected
+    predictions = pipeline.get_data("deep_learning_predictions")  # Retrieve model output from pipeline
+    expected_len = NUM_MAIN_NUMBERS + NUM_POWERBALLS               # Expected vector length (40 + 10)
 
 
     # ---------------------------------------------
     # Safety fallback if predictions missing/invalid
     # ---------------------------------------------
 
-    if predictions is None or len(predictions) != expected_len:
+    if predictions is None or len(predictions) != expected_len:    # Validate prediction vector
         print("Missing or invalid predictions. Using uniform fallback.")
 
-        fallback_main = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS  # Uniform main distribution
-        fallback_pb   = np.ones(NUM_POWERBALLS) / NUM_POWERBALLS      # Uniform PB distribution
+        base_main_prob = np.ones(NUM_MAIN_NUMBERS) / NUM_MAIN_NUMBERS  # Uniform main-number distribution
+        base_pb_prob   = np.ones(NUM_POWERBALLS) / NUM_POWERBALLS      # Uniform Powerball distribution
 
-        # Generate uniform ticket lines (basic fallback behaviour)
-        ticket = [
-            {
-                "line": sorted(
-                    np.random.choice(
-                        np.arange(1, NUM_MAIN_NUMBERS + 1),  # pool 1..N
-                        NUM_PER_LINE,                        # pick count
-                        replace=False,                       # no repeats inside line
-                        p=fallback_main                      # prob distribution
-                    )
-                ),
-                "powerball": np.random.choice(
-                    np.arange(1, NUM_POWERBALLS + 1),        # PB pool 1..M
-                    p=fallback_pb
-                )
-            }
-            for _ in range(NUM_LINES)
-        ]
+    else:
+        predictions = np.asarray(predictions, dtype=float)         # Ensure numeric array
 
-        save_current_ticket(ticket)  # Persist ticket
-        return ticket                # Return ticket
+        base_main_prob = safe_norm(predictions[:NUM_MAIN_NUMBERS]) # Extract + normalise main-number probabilities
+        base_pb_prob   = safe_norm(predictions[NUM_MAIN_NUMBERS:]) # Extract + normalise Powerball probabilities
 
 
     # ---------------------------------------------
-    # Convert predictions -> main + PB distributions
+    # Usage tracking (diversity control only)
     # ---------------------------------------------
 
-    predictions = np.asarray(predictions, dtype=float)  # Force float array
+    main_usage = np.zeros(NUM_MAIN_NUMBERS, dtype=int)  # Track how often each main number is used
+    pb_usage   = np.zeros(NUM_POWERBALLS, dtype=int)    # Track how often each Powerball is used
 
-    base_main_prob = safe_norm(predictions[:NUM_MAIN_NUMBERS])  # First block = main numbers
-    base_pb_prob   = safe_norm(predictions[NUM_MAIN_NUMBERS:])  # Second block = PB numbers
-
-
-    # ---------------------------------------------
-    # Stateful working distributions across lines
-    # ---------------------------------------------
-
-    main_prob = base_main_prob.copy()  # Working main distribution
-    pb_prob   = base_pb_prob.copy()    # Working PB distribution
-
-
-    # ---------------------------------------------
-    # Ticket construction state
-    # ---------------------------------------------
-
-    ticket = []  # Collected lines
-
-    # PB count limiter (enforces MAX_SAME_POWERBALL)
-    pb_counts = np.zeros(NUM_POWERBALLS, dtype=int)
+    ticket = []  # Store accepted ticket lines
 
 
     # ---------------------------------------------
     # Generate each ticket line
     # ---------------------------------------------
 
-    for line_idx in range(NUM_LINES):  # One loop iteration per line
+    for _ in range(NUM_LINES):           # Loop once per ticket line
 
-        chosen_main = None  # Accepted main numbers for this line
-        chosen_pb = None    # Accepted powerball for this line
+        chosen_main = None               # Placeholder for accepted main numbers
+        chosen_pb = None                 # Placeholder for accepted Powerball
 
 
-        # -----------------------------------------
-        # Rejection sampling loop
-        # Attempts multiple candidates until constraints met
-        # -----------------------------------------
+        for _ in range(MAX_RESAMPLE_TRIES):  # Rejection-sampling loop
 
-        for attempt in range(MAX_RESAMPLE_TRIES):
+            # -------------------------------------
+            # Apply usage-based penalties
+            # -------------------------------------
 
-            # Candidate main line numbers
-            cand_main = sorted(
+            main_penalty = np.power(MAIN_USAGE_PENALTY, main_usage)  # Compute per-number main penalties
+            pb_penalty   = np.power(PB_USAGE_PENALTY, pb_usage)      # Compute per-number PB penalties
+
+            effective_main_prob = safe_norm(base_main_prob * main_penalty)  # Combine prediction + usage penalty
+            effective_pb_prob   = safe_norm(base_pb_prob * pb_penalty)      # Combine prediction + usage penalty
+
+
+            # -------------------------------------
+            # Sample candidate line
+            # -------------------------------------
+
+            cand_main = sorted(                                   # Sort for consistency/readability
                 np.random.choice(
-                    np.arange(1, NUM_MAIN_NUMBERS + 1),  # pool
-                    size=NUM_PER_LINE,                   # pick count
-                    replace=False,                       # unique within line
-                    p=main_prob                          # current prob vector
+                    np.arange(1, NUM_MAIN_NUMBERS + 1),          # Main number domain
+                    size=NUM_PER_LINE,                            # Select 6 numbers
+                    replace=False,                                # No duplicates within a line
+                    p=effective_main_prob                         # Probability-weighted sampling
                 )
             )
 
-            # Candidate PB number
-            cand_pb = int(
+            cand_pb = int(                                        # Sample Powerball
                 np.random.choice(
-                    np.arange(1, NUM_POWERBALLS + 1),  # PB pool
-                    p=pb_prob
+                    np.arange(1, NUM_POWERBALLS + 1),             # Powerball domain
+                    p=effective_pb_prob                           # Probability-weighted sampling
                 )
             )
 
 
             # -------------------------------------
-            # Constraint 1: main overlap limiter
-            # Cand line must not share too many numbers with any previous line
+            # Constraint checks
             # -------------------------------------
 
-            too_much_overlap = False  # Track candidate rejection
-            for prev in ticket:       # Compare against each previous accepted line
-                if _overlap_count(cand_main, prev["line"]) > MAX_OVERLAP_MAIN:
-                    too_much_overlap = True  # Candidate violates overlap rule
-                    break                    # Stop checking
-            if too_much_overlap:
-                continue  # Reject candidate and resample
+            if pb_usage[cand_pb - 1] >= MAX_SAME_POWERBALL:        # Enforce PB repetition cap
+                continue                                          # Reject candidate
+
+            if any(                                                # Enforce overlap constraint
+                _overlap_count(cand_main, prev["line"]) > MAX_OVERLAP_MAIN
+                for prev in ticket
+            ):
+                continue                                          # Reject candidate
 
 
-            # -------------------------------------
-            # Constraint 2: PB repetition limiter
-            # -------------------------------------
-
-            if pb_counts[cand_pb - 1] >= MAX_SAME_POWERBALL:
-                continue  # Reject PB candidate and resample
-
-
-            # -------------------------------------
-            # Candidate passed constraints -> accept
-            # -------------------------------------
-
-            chosen_main = cand_main
-            chosen_pb = cand_pb
-            break  # Exit resample loop
+            chosen_main = cand_main                                # Accept main numbers
+            chosen_pb = cand_pb                                    # Accept Powerball
+            break                                                  # Exit resampling loop
 
 
         # -----------------------------------------
-        # Fallback if constraints cannot be satisfied
-        # (still generates a valid ticket line)
+        # Absolute fallback (extremely rare)
         # -----------------------------------------
 
-        if chosen_main is None or chosen_pb is None:
+        if chosen_main is None or chosen_pb is None:               # If no valid candidate found
 
-            # Accept a line without constraint checks (last resort)
             chosen_main = sorted(
                 np.random.choice(
                     np.arange(1, NUM_MAIN_NUMBERS + 1),
                     size=NUM_PER_LINE,
                     replace=False,
-                    p=main_prob
+                    p=base_main_prob                               # Sample directly from learned distribution
                 )
             )
 
             chosen_pb = int(
                 np.random.choice(
                     np.arange(1, NUM_POWERBALLS + 1),
-                    p=pb_prob
+                    p=base_pb_prob                                 # Sample directly from learned distribution
                 )
             )
 
 
         # -----------------------------------------
-        # Add accepted line to ticket
+        # Commit accepted line
         # -----------------------------------------
 
-        ticket.append({
+        ticket.append({                                            # Append final line to ticket
             "line": chosen_main,
             "powerball": chosen_pb
         })
 
-        # Track PB repetition
-        pb_counts[chosen_pb - 1] += 1
+        for n in chosen_main:                                      # Update main-number usage counts
+            main_usage[n - 1] += 1
 
-
-        # -----------------------------------------
-        # Apply cross-line decay penalties (HARD requirement)
-        # -----------------------------------------
-
-        # Penalise used main numbers by multiplying probability mass
-        for n in chosen_main:
-            main_prob[n - 1] *= DECAY_MAIN  # Convert 1-based number to 0-based index
-
-        # Penalise used PB number
-        pb_prob[chosen_pb - 1] *= DECAY_POWERBALL
-
-
-        # -----------------------------------------
-        # Renormalise distributions AFTER penalties
-        # -----------------------------------------
-
-        main_prob = safe_norm(main_prob)  # Keep valid distribution
-        pb_prob   = safe_norm(pb_prob)    # Keep valid distribution
+        pb_usage[chosen_pb - 1] += 1                               # Update Powerball usage count
 
 
     # ---------------------------------------------
-    # Persist and return the final ticket
+    # Persist and return final ticket
     # ---------------------------------------------
 
-    save_current_ticket(ticket)  # Write ticket JSON
-    return ticket                # Return structure used by pipeline
+    save_current_ticket(ticket)                                    # Persist ticket to storage
+    return ticket                                                  # Return ticket to caller
+
 
 
 
