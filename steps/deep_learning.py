@@ -501,6 +501,6 @@ def deep_learning_prediction(pipeline):
 
     pipeline.add_data(
         "deep_learning_predictions",  # Store output in pipeline
-        _prop_norm_vec(np.clip(dl_pred, 0.0, 1.0), "deep_learning_predictions")  # Ensure final probabilities are within [0, 1]
+        _prob_norm_vec(np.clip(dl_pred, 0.0, 1.0), "deep_learning_predictions")  # Ensure final probabilities are within [0, 1]
     )
 
