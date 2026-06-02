@@ -216,12 +216,19 @@ def insert_epoch_metrics(run_date, epoch, loss, val_loss,
                          auc, val_auc, mae, val_mae):
     """
     Inserts a single epoch's metrics into the 'epochs' table.
+    All floating-point metrics are rounded to 4 decimal places for readability.
+    run_date is stored as DATE only (YYYY-MM-DD).
     """
     conn = get_connection()
     if not conn:
         return None
     try:
         cursor = conn.cursor()
+        
+        # Force date-only (removes any time component)
+        clean_date = run_date.split(" ")[0] if " " in run_date else run_date
+        
+        # Round all metrics to 4 decimal places
         sql = """
         INSERT INTO epochs (
             run_date, epoch, loss, val_loss,
@@ -230,10 +237,18 @@ def insert_epoch_metrics(run_date, epoch, loss, val_loss,
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         cursor.execute(sql, (
-            run_date, epoch, loss, val_loss,
-            binary_accuracy, val_binary_accuracy,
-            auc, val_auc, mae, val_mae
+            clean_date,
+            epoch,
+            round(loss, 4),
+            round(val_loss, 4),
+            round(binary_accuracy, 4),
+            round(val_binary_accuracy, 4),
+            round(auc, 4),
+            round(val_auc, 4),
+            round(mae, 4),
+            round(val_mae, 4)
         ))
+        
         conn.commit()
         row_id = cursor.lastrowid
         cursor.close()
