@@ -9,7 +9,6 @@
 import os  # OS utilities used for environment setup
 import logging  # Standard logging module
 from typing import Any, Dict, Tuple, List  # Type hinting for better clarity and error checking
-import numpy as np  # Numerical computing
 
 # Constants defining the lottery structure
 NUM_MAIN_NUMBERS = 40  # Number of main numbers in each draw
@@ -55,8 +54,22 @@ class DataPipeline:
     Enables shared access to intermediate computations.
     """
     def __init__(self) -> None:
-        self.data: Dict[str, Any] = {}  # Internal dictionary to hold data elements
+        self.data: Dict[str, Any] = {}
+
+        # Tracks which feature pipes are enabled for ablation testing
+        self.active_pipes = {
+            "bayesian_fusion_norm": True,
+            "monte_carlo": True,
+            "redundancy": True,
+            "markov_features": True,
+            "entropy_features": True,
+            "clusters": True,
+            "centroids": True
+        }
+
         logging.info("Initialized DataPipeline.")
+
+
 
     def add_data(self, key: str, value: Any) -> None:
         """
@@ -73,20 +86,60 @@ class DataPipeline:
 
     def get_data(self, key: str) -> Any:
         """
-        Retrieve a data element by key.
+        Retrieve pipeline data.
 
-        Args:
-            key (str): Key to look up.
-
-        Returns:
-            Any: The data associated with the key, or None if missing.
+        If a pipe is disabled during ablation,
+        it behaves as though no data exists.
         """
+
+        if key in self.active_pipes and not self.active_pipes[key]:
+            logging.debug(f"Pipe '{key}' is disabled.")
+            return None
+
         value = self.data.get(key)
+
         if value is not None:
             logging.debug(f"Retrieved pipeline data for key '{key}'.")
         else:
             logging.debug(f"No pipeline data for key '{key}'.")
+
         return value
+
+    def disable_pipe(self, pipe_name: str) -> None:
+        """
+        Disable a pipe during ablation testing.
+        """
+        if pipe_name in self.active_pipes:
+            self.active_pipes[pipe_name] = False
+            logging.info(f"Disabled pipe: {pipe_name}")
+
+
+    def enable_pipe(self, pipe_name: str) -> None:
+        """
+        Re-enable a pipe after testing.
+        """
+        if pipe_name in self.active_pipes:
+            self.active_pipes[pipe_name] = True
+            logging.info(f"Enabled pipe: {pipe_name}")
+
+
+    def evaluate(self) -> float:
+        """
+        Return latest validation AUC.
+
+        Used by Optuna bridge for real ablation scoring.
+        """
+
+        val_auc = self.data.get("latest_val_auc")
+
+        if val_auc is None:
+            raise ValueError(
+                "No validation AUC stored. "
+                "deep_learning.py must save latest_val_auc."
+            )
+
+        return float(val_auc)
+
 
     def clear_pipeline(self) -> None:
         """

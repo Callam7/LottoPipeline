@@ -39,6 +39,9 @@ from steps.entropy import shannon_entropy_features
 from steps.bayesian_fusion import bayesian_fusion_with_mechanics
 from steps.deep_learning import deep_learning_prediction
 
+#adaptor software import
+from adaptor.optuna_bridge import run_optuna_bridge
+
 # Constants
 NUM_PICK_MAIN = 6
 MAX_MAIN_NUMBER = 40
@@ -219,6 +222,9 @@ def main():
             print("\nNew ticket generated:")
             for idx, line in enumerate(new_ticket, 1):
                 print(f"Line {idx}: {line['line']} | Powerball: {line['powerball']}")
+            # === Run Optuna Bridge AFTER everything is complete ===
+            # It will check the last 6 runs and suggest changes if needed
+            run_optuna_bridge(pipeline)
 
         elif choice == "4":
             view_number_stats(pipeline)
