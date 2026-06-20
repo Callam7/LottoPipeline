@@ -15,7 +15,8 @@ NUM_TOTAL = NUM_MAIN + NUM_POWERBALL   # Total length of probability vector (50)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def kmeans_clustering_and_correlation(pipeline, n_clusters_main=4, n_clusters_powerball=3):#<----Revert back to 5, 3 if not working--->#
+def kmeans_clustering_and_correlation(pipeline, n_clusters_main=5, n_clusters_powerball=5):
+    #<----Revert back to 5, 3 if not working--->#
     fusion = pipeline.get_data("bayesian_fusion")  # Retrieve fused probability vector from pipeline
 
     # Validate fusion vector

@@ -10,6 +10,8 @@ Purpose:
 import logging
 import sqlite3
 import statistics
+from typing import Any, Dict, Optional
+
 import optuna
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -20,7 +22,7 @@ MIN_IMPROVEMENT = 0.002
 
 # Stage 1: Known parameter spaces for pipes we can currently suggest on.
 # Keep this small and honest. Only add pipes when we actually have meaningful parameters to tune.
-KNOWN_PARAMETER_SPACES = {
+KNOWN_PARAMETER_SPACES: Dict[str, Dict[str, tuple]] = {
     "entropy_features": {
         "entropy_weight": (0.5, 2.0),
         "entropy_smoothing": (1e-6, 1e-2, "log"),
@@ -44,7 +46,7 @@ KNOWN_PARAMETER_SPACES = {
 }
 
 
-def get_last_six_runs():
+def get_last_six_runs() -> list:
     query = """
         WITH BatchStats AS (
             SELECT run_date,
@@ -71,7 +73,8 @@ def get_last_six_runs():
     return rows
 
 
-def compare_latest_to_previous(runs):
+def compare_latest_to_previous(runs: list) -> bool:
+    """Returns True if latest batch shows meaningful improvement (we should NOT suggest changes yet)."""
     if len(runs) < 2:
         return True
     latest = runs[0][2]
@@ -88,7 +91,7 @@ def compare_latest_to_previous(runs):
     return False
 
 
-def perform_full_pipe_ablation(pipeline):
+def perform_full_pipe_ablation(pipeline: Any) -> Optional[str]:
     if pipeline is None:
         logging.error("Pipeline object not provided.")
         return None
@@ -98,24 +101,24 @@ def perform_full_pipe_ablation(pipeline):
         logging.warning("No valid pipe_importance found.")
         return None
 
-    most_impactful = min(importance, key=importance.get)
+    most_impactful = min(importance, key=importance.get)  # most negative delta = largest contribution
     delta = importance[most_impactful]
     logging.info(f"Most impactful pipe: {most_impactful} (delta={delta:.6f})")
     return most_impactful
 
 
-def get_optuna_suggestion(pipe_name: str):
+def get_optuna_suggestion(pipe_name: str) -> Dict[str, Any]:
     study = optuna.create_study(
         study_name="lotto_pipeline_adaptor",
         storage=f"sqlite:///{DB_PATH}",
         load_if_exists=True,
-        direction="maximize"
+        direction="maximize",
     )
     trial = study.ask()
 
     if pipe_name in KNOWN_PARAMETER_SPACES:
         space = KNOWN_PARAMETER_SPACES[pipe_name]
-        suggestion = {}
+        suggestion: Dict[str, Any] = {}
         for param, bounds in space.items():
             if len(bounds) == 3 and bounds[2] == "int":
                 suggestion[param] = trial.suggest_int(param, bounds[0], bounds[1])
@@ -124,7 +127,6 @@ def get_optuna_suggestion(pipe_name: str):
             else:
                 suggestion[param] = trial.suggest_float(param, bounds[0], bounds[1])
     else:
-        # Honest fallback for pipes we cannot yet suggest meaningful parameters for
         suggestion = {}
         logging.info(f"No defined parameter space for '{pipe_name}'. No specific suggestion generated.")
 
@@ -132,12 +134,13 @@ def get_optuna_suggestion(pipe_name: str):
     return suggestion
 
 
-def run_optuna_bridge(pipeline=None):
+def run_optuna_bridge(pipeline: Any = None) -> None:
     runs = get_last_six_runs()
     if not runs:
         return
 
     if compare_latest_to_previous(runs):
+        # Performance is still improving or insufficient history → do not suggest yet
         return
 
     if pipeline is None:
@@ -150,7 +153,7 @@ def run_optuna_bridge(pipeline=None):
 
     suggestion = get_optuna_suggestion(most_impactful_pipe)
     if suggestion:
-        logging.info(f"=== Stage 1 Suggestion Ready ===")
+        logging.info("=== Stage 1 Suggestion Ready ===")
         logging.info(f"Pipe: {most_impactful_pipe}")
         logging.info(f"Suggested changes: {suggestion}")
 

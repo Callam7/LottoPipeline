@@ -1,18 +1,15 @@
 ﻿"""
 Modified By: Callam
 Project: Lotto Generator
-
 Purpose:
     Deep learning prediction pipeline for lottery probabilities:
         - 40 main numbers
         - 10 Powerball numbers
     Output is always shape (50,), compatible with the ticket generator.
-
 Design:
     This module does NOT assume determinism.
     It assumes that if weak signal exists, it should not be suppressed
     by over-regularisation, premature stopping, or metric noise.
-
 Pipeline stages:
     1) Build classical feature matrix from pipeline signals.
     2) Build strict multi-hot labels from historical draws.
@@ -21,71 +18,77 @@ Pipeline stages:
     5) Compute quantum kernel features (fidelity-based).
     6) Fuse classical + quantum + kernel features.
     7) Train deep learning model on fused features.
+    8) Post-training pipe importance ablation (for Optuna bridge).
 """
+import logging # Standard Python logging
+from typing import Any, Dict, List, Tuple # Type hints for clarity and static checking
 
-import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from config.logs import EpochLogger
-from pipeline import get_dynamic_params
-import logging
-from config.quantum_features import (
-    compute_quantum_matrix,
-    train_quantum_encoder,
-    QUANTUM_FEATURE_LEN,
+import numpy as np # Core numerical array library used throughout
+import tensorflow as tf # TensorFlow backend used for training and tensor ops
+from tensorflow import keras # Keras API for model definition/training
+
+from config.logs import EpochLogger # Custom callback to log epoch progress cleanly
+from pipeline import get_dynamic_params # Dynamic training params (supports Optuna overrides)
+from config.quantum_features import ( # Imports quantum feature utilities/constants
+    compute_quantum_matrix, # Builds quantum feature matrix from classical inputs
+    train_quantum_encoder, # Trains/tunes the quantum encoder parameters
+    QUANTUM_FEATURE_LEN, # Fixed width expected from compute_quantum_matrix output
 )
-from config import quantum_kernels as qk
-from config.quantum_kernels import build_quantum_kernel_features
-from typing import Dict, List, Tuple, Any
+from config import quantum_kernels as qk # Imports module itself (to access cache vars)
+from config.quantum_kernels import build_quantum_kernel_features # Builds kernel features
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Optional sklearn import moved to top for cleanliness
+try:
+    from sklearn.metrics import roc_auc_score # Used only inside pipe importance function
+except ImportError:
+    roc_auc_score = None # Graceful fallback if sklearn missing
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s") # Set log format/level
 
 # ===================== Constants ===================== #
-NUM_MAIN = 40
-NUM_POWERBALL = 10
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL
+NUM_MAIN = 40 # Main number count (1..40)
+NUM_POWERBALL = 10 # Powerball number count (1..10)
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL # Total output width (50)
 
-EPOCH_SIZE = 60
-BATCH_SIZE = 32
-DATA_AUGMENTATION_ROUNDS = 3
-NOISE_STDDEV = 0.01
-MIN_CLASS_WEIGHT = 1.0
-MAX_CLASS_WEIGHT = 4.0
-MIN_PROB = 1e-7
-KERNEL_PROTOTYPES = 24
+EPOCH_SIZE = 60 # Default number of training epochs (upper bound, can be overridden by Optuna)
+BATCH_SIZE = 32 # Default mini-batch size
+DATA_AUGMENTATION_ROUNDS = 3 # How many noisy copies of train data to add
+NOISE_STDDEV = 0.01 # Noise scale applied to features (not labels)
 
-class_weights = None
-class_weights_tf = None
+MIN_CLASS_WEIGHT = 1.0 # Minimum positive-class weight
+MAX_CLASS_WEIGHT = 4.0 # Maximum positive-class weight
+MIN_PROB = 1e-7 # Used for clipping probabilities and avoiding divide-by-zero / log(0)
+
+KERNEL_PROTOTYPES = 24 # Number of kernel prototypes (feature width for K_*)
+
+class_weights = None # Numpy weights computed from training label imbalance
+class_weights_tf = None # TensorFlow constant version used inside loss
 
 # ===================== CLASSICAL FEATURE BLOCK DEFINITION (Future-Proof) ===================== #
-# This list and helper function serve as the single source of truth for the order
-# of classical feature blocks. When the future adaptor adds, removes, or reorders
-# pipes, only this definition needs to be updated. This prevents desync between
-# feature construction (Step 5) and ablation logic.
-
+# Single source of truth for feature block order.
+# When future pipes are added/removed/reordered, only update this list.
 CLASSICAL_FEATURE_BLOCKS: List[str] = [
-    "bayesian_fusion_norm",
-    "monte_carlo",
-    "redundancy",
-    "markov_features",
-    "entropy_features",
-    "centroids",
-    "clusters",
+    "bayesian_fusion_norm", # Bayesian fused probabilities
+    "monte_carlo", # Monte Carlo simulation probabilities
+    "redundancy", # Redundancy / coverage features
+    "markov_features", # Markov chain transition features
+    "entropy_features", # Shannon entropy features
+    "centroids", # Cluster centroid vectors
+    "clusters", # Cluster assignment vectors
 ]
 
-
 def _get_classical_feature_arrays(
-    mc: np.ndarray,
-    rd: np.ndarray,
-    mk: np.ndarray,
-    en: np.ndarray,
-    fn: np.ndarray,
-    centroids: np.ndarray,
-    clusters: np.ndarray,
+    mc: np.ndarray, # Monte Carlo probability vector
+    rd: np.ndarray, # Redundancy probability vector
+    mk: np.ndarray, # Markov feature vector
+    en: np.ndarray, # Entropy feature vector
+    fn: np.ndarray, # Bayesian fusion norm vector
+    centroids: np.ndarray, # Centroid vector
+    clusters: np.ndarray, # Cluster vector
 ) -> List[Tuple[str, np.ndarray]]:
-    """Returns the classical feature blocks in the exact order used in Step 5."""
+    """Returns the classical feature blocks in the exact order defined by CLASSICAL_FEATURE_BLOCKS."""
     return [
-        ("bayesian_fusion_norm", fn),
+        ("bayesian_fusion_norm", fn), # Must match order in CLASSICAL_FEATURE_BLOCKS
         ("monte_carlo", mc),
         ("redundancy", rd),
         ("markov_features", mk),
@@ -93,7 +96,6 @@ def _get_classical_feature_arrays(
         ("centroids", centroids),
         ("clusters", clusters),
     ]
-
 
 # ===================== Quantum kernel cache reset ===================== #
 def _reset_quantum_kernel_cache():
@@ -106,10 +108,9 @@ def _reset_quantum_kernel_cache():
     silently corrupt kernel features.
     This reset guarantees semantic consistency.
     """
-    qk._cached_proto_states = None
-    qk._cached_num_prototypes = None
-    qk._cached_seed = None
-
+    qk._cached_proto_states = None # Drops cached prototype statevectors
+    qk._cached_num_prototypes = None # Drops cached prototype count
+    qk._cached_seed = None # Drops cached seed (prototypes are seed-dependent)
 
 # ===================== Weighted BCE ===================== #
 def weighted_bce(y_true, y_pred):
@@ -119,153 +120,139 @@ def weighted_bce(y_true, y_pred):
         - NO label smoothing (preserves ranking signal)
         - Positive-class weighting only
         - y_pred clipped for numerical safety
-    Shapes:
-        y_true: (batch, 50)
-        y_pred: (batch, 50)
     """
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-    y_pred = tf.clip_by_value(y_pred, MIN_PROB, 1.0 - MIN_PROB)
-    bce = keras.backend.binary_crossentropy(y_true, y_pred)
-    w = y_true * class_weights_tf + (1.0 - y_true)
-    return tf.reduce_mean(bce * w, axis=-1)
-
+    y_true = tf.cast(y_true, tf.float32) # Loss math assumes float tensors
+    y_pred = tf.cast(y_pred, tf.float32) # Ensure predictions match dtype too
+    y_pred = tf.clip_by_value(y_pred, MIN_PROB, 1.0 - MIN_PROB) # Clamp to safe open interval (avoid log(0))
+    bce = keras.backend.binary_crossentropy(y_true, y_pred) # Elementwise BCE per label -> (batch, 50)
+    w = y_true * class_weights_tf + (1.0 - y_true) # Apply class weight only when y_true == 1, else weight = 1.0
+    return tf.reduce_mean(bce * w, axis=-1) # Mean across the 50 labels, keep batch dimension
 
 # ===================== Shape utilities ===================== #
 def _ensure_2d(X: np.ndarray, name: str) -> np.ndarray:
-    X = np.asarray(X, dtype=float)
-    if X.ndim == 1:
-        X = X.reshape(1, -1)
-    if X.ndim != 2:
-        raise ValueError(f"{name} must be 2D, got shape {X.shape}")
-    return X
-
+    X = np.asarray(X, dtype=float) # Converts to float NumPy array
+    if X.ndim == 1: # If vector, treat as single row
+        X = X.reshape(1, -1) # Shape becomes (1, features)
+    if X.ndim != 2: # Rejects higher-rank inputs early
+        raise ValueError(f"{name} must be 2D, got shape {X.shape}") # Fail fast with clear message
+    return X # Returns guaranteed 2D matrix
 
 def _force_width(M: np.ndarray, width: int, name: str) -> np.ndarray:
-    M = _ensure_2d(M, name)
-    n, d = M.shape
-    if d == width:
-        return M.astype(float)
-    out = np.zeros((n, width), dtype=float)
-    m = min(d, width)
-    out[:, :m] = M[:, :m]
-    logging.warning(f"{name} width {d} != {width}; padded/trimmed to {width}.")
-    return out
-
+    M = _ensure_2d(M, name) # Ensures we can safely read .shape
+    n, d = M.shape # n = rows, d = current columns
+    if d == width: # Already correct width → nothing to do
+        return M.astype(float) # Ensure float dtype
+    out = np.zeros((n, width), dtype=float) # Allocate output matrix of target width
+    m = min(d, width) # Size of overlapping region
+    out[:, :m] = M[:, :m] # Copy the overlapping columns
+    logging.warning(f"{name} width {d} != {width}; padded/trimmed to {width}.") # Notify that shape correction happened
+    return out # Return width-corrected matrix
 
 def _prob_norm_vec(x: np.ndarray, name: str) -> np.ndarray:
-    x = np.asarray(x, dtype=float).ravel()
-    if x.size != NUM_TOTAL:
-        raise ValueError(f"{name} expected len {NUM_TOTAL}, got {x.size}")
-    x = np.clip(x, 0.0, None)
-    s = float(x.sum())
-    if s <= 0.0:
-        return np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL
-    return x / s
+    x = np.asarray(x, dtype=float).ravel() # Flatten to 1D float array
+    if x.size != NUM_TOTAL: # Enforce expected output width (50)
+        logging.warning(f"{name} expected len {NUM_TOTAL}, got {x.size}. Padding/truncating.")
+        if x.size < NUM_TOTAL:
+            x = np.pad(x, (0, NUM_TOTAL - x.size), constant_values=0.0) # Pad with zeros if too short
+        x = x[:NUM_TOTAL] # Truncate if too long
+    x = np.clip(x, 0.0, None) # Probabilities must not be negative
+    s = float(x.sum()) # Total mass
+    if s <= 0.0: # If vector is all zeros (or invalid), fallback to uniform
+        return np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL # Uniform distribution across 50 bins
+    return x / s # Normalise so sum == 1.0
 
+def _build_feature_matrix(
+    F: np.ndarray, # Prefix frequency matrix (n_draws, 50)
+    feature_blocks: List[Tuple[str, np.ndarray]], # List of (name, vector) pairs in correct order
+) -> np.ndarray:
+    """Centralized feature matrix builder to keep training and inference identical."""
+    X_parts = [] # Will hold each feature block before horizontal concatenation
+    for name, arr in feature_blocks: # Iterate in the order defined by CLASSICAL_FEATURE_BLOCKS
+        arr = arr.reshape(1, -1) # Ensure row vector shape (1, 50)
+        if name in ["centroids", "clusters"]: # These are static per-number vectors (not multiplied by F)
+            X_parts.append(np.tile(arr, (F.shape[0], 1))) # Repeat the vector for every historical timestep
+        else:
+            X_parts.append(F * arr) # Multiply prefix frequencies by the probability vector
+    return np.column_stack(X_parts).astype(float) # Concatenate all blocks horizontally → final classical feature matrix
 
+# ===================== Post-training Pipe Importance (Clean) ===================== #
 def _compute_pipe_importance(
-    model: keras.Model, Xf_val: np.ndarray, Y_val: np.ndarray
+    model: keras.Model, # Trained Keras model
+    Xf_val: np.ndarray, # Validation fused features
+    Y_val: np.ndarray, # Validation labels
 ) -> Dict[str, float]:
     """
-    Post-training ablation (future-proof version).
-    Uses CLASSICAL_FEATURE_BLOCKS as the single source of truth.
-    Zeros each feature block one at a time and measures change in macro AUC.
-
-    delta = modified_auc - baseline_auc
-        < 0  → pipe was useful (removing it hurt performance)
-        > 0  → pipe was noisy (removing it helped)
-        ≈ 0  → pipe contributed almost nothing
+    Post-training ablation using CLASSICAL_FEATURE_BLOCKS as single source of truth.
+    Zeros each classical feature block one-by-one and measures change in macro AUC.
+    Negative delta = pipe was useful (removing it hurt performance).
     """
-    from sklearn.metrics import roc_auc_score   # moved outside the loop for speed
+    if roc_auc_score is None: # sklearn not installed
+        logging.warning("sklearn not available - skipping pipe importance analysis.")
+        return {}
 
-    block_size = NUM_TOTAL
-    pipes: Dict[str, Tuple[int, int]] = {}
-    for i, name in enumerate(CLASSICAL_FEATURE_BLOCKS):
+    block_size = NUM_TOTAL # Each pipe block is 50 columns wide
+    pipes: Dict[str, Tuple[int, int]] = {} # name -> (start_col, end_col)
+    for i, name in enumerate(CLASSICAL_FEATURE_BLOCKS): # Build column ranges from the single source of truth
         start = i * block_size
         end = start + block_size
         pipes[name] = (start, end)
 
-    # Baseline
-    baseline_pred = model.predict(Xf_val, verbose=0)
+    # Baseline prediction and AUC
+    baseline_pred = model.predict(Xf_val, verbose=0) # Get predictions on clean validation set
     try:
-        baseline_auc = roc_auc_score(Y_val, baseline_pred, average="macro")
+        baseline_auc = roc_auc_score(Y_val, baseline_pred, average="macro") # Macro AUC across all 50 labels
     except Exception:
-        baseline_auc = 0.5
+        baseline_auc = 0.5 # Fallback if AUC cannot be computed
 
-    importance: Dict[str, float] = {}
+    importance: Dict[str, float] = {} # Will store delta per pipe
 
-    for pipe_name, (start_col, end_col) in pipes.items():
-        X_modified = Xf_val.copy()
-        X_modified[:, start_col:end_col] = 0.0
-
-        modified_pred = model.predict(X_modified, verbose=0)
-        try:
-            modified_auc = roc_auc_score(Y_val, modified_pred, average="macro")
-        except Exception:
-            modified_auc = baseline_auc
-
-        delta = modified_auc - baseline_auc
-        importance[pipe_name] = float(delta)
-
-    # Print clean summary
     print("\n" + "=" * 72)
     print("POST-TRAINING PIPE IMPORTANCE ANALYSIS (future-proof)")
     print("=" * 72)
     print(f"Baseline Validation AUC: {baseline_auc:.4f}")
     print("-" * 72)
-    print(f"{'Pipe Name':<28} {'Modified AUC':>14} {'Delta (Impact)':>16}")
+    print(f"{'Pipe Name':<28} {'Delta (Impact)':>16}")
     print("-" * 72)
-    for name in CLASSICAL_FEATURE_BLOCKS:
-        d = importance.get(name, 0.0)
-        # We don't have per-pipe modified_auc here anymore for brevity, but you can add it if wanted
-        print(f"{name:<28} {'N/A':>14} {d:>16.4f}")
 
-    most_impactful = min(importance, key=importance.get)
+    for pipe_name, (start_col, end_col) in pipes.items(): # Iterate in defined order
+        X_modified = Xf_val.copy() # Work on a copy so we don't corrupt original
+        X_modified[:, start_col:end_col] = 0.0 # Zero out this entire pipe block
+
+        modified_pred = model.predict(X_modified, verbose=0) # Predict with this pipe removed
+        try:
+            modified_auc = roc_auc_score(Y_val, modified_pred, average="macro")
+        except Exception:
+            modified_auc = baseline_auc
+
+        delta = modified_auc - baseline_auc # Negative delta = this pipe helped performance
+        importance[pipe_name] = float(delta)
+        print(f"{pipe_name:<28} {delta:>16.4f}")
+
+    most_impactful = min(importance, key=importance.get) # Most negative delta = largest contribution
     print("-" * 72)
-    print(f"Most impactful pipe (largest positive contribution): {most_impactful} "
-          f"(delta={importance[most_impactful]:.4f})")
+    print(
+        f"Most impactful pipe (largest contribution / most negative delta): "
+        f"{most_impactful} (delta={importance[most_impactful]:.4f})"
+    )
     print("=" * 72 + "\n")
 
-    return importance
-
-    # Clean, relevant summary output (no log flooding)
-    print("\n" + "=" * 72)
-    print("POST-TRAINING PIPE IMPORTANCE ANALYSIS")
-    print("=" * 72)
-    print(f"Baseline Validation AUC: {baseline_auc:.4f}")
-    print("-" * 72)
-    print(f"{'Pipe Name':<28} {'Modified AUC':>14} {'Delta (Impact)':>16}")
-    print("-" * 72)
-
-    for r in results:
-        print(f"{r['pipe']:<28} {r['modified_auc']:>14.4f} {r['delta']:>16.4f}")
-
-    weakest_pipe = min(importance, key=importance.get)
-    weakest_delta = importance[weakest_pipe]
-
-    print("-" * 72)
-    print(f"Weakest Pipe Identified: {weakest_pipe} (Delta: {weakest_delta:.4f})")
-    print("=" * 72 + "\n")
-
-    return importance
-
+    return importance # Return dict for Optuna bridge consumption
 
 # ===================== Main entry ===================== #
 def deep_learning_prediction(pipeline: Any) -> None:
-    global class_weights, class_weights_tf
+    global class_weights, class_weights_tf # Allows loss function to access run-specific weights
 
     # Resolve dynamic training parameters (supports Optuna overrides)
-    _, dynamic_epochs = get_dynamic_params(
+    _, dynamic_epochs = get_dynamic_params( # Get dynamic epoch count based on data size
         len(pipeline.get_data("historical_data") or [])
     )
-    optuna_params = pipeline.get_data("optuna_best_params") or {}
-    epochs = optuna_params.get("epochs", dynamic_epochs)
-    batch_size = optuna_params.get("batch_size", BATCH_SIZE)
-    learning_rate = optuna_params.get("learning_rate", 8e-4)
-    dropout_rate = optuna_params.get("dropout_rate", 0.25)
+    optuna_params = pipeline.get_data("optuna_best_params") or {} # Pull best params from Optuna if present
+    epochs = optuna_params.get("epochs", dynamic_epochs) # Use Optuna value or fallback to dynamic
+    batch_size = optuna_params.get("batch_size", BATCH_SIZE) # Use Optuna value or default
+    learning_rate = optuna_params.get("learning_rate", 8e-4) # Use Optuna value or default
+    dropout_rate = optuna_params.get("dropout_rate", 0.25) # Use Optuna value or default
 
-    logging.info(
+    logging.info( # Log the final resolved training hyperparameters
         f"DL params -> epochs={epochs}, "
         f"batch_size={batch_size}, "
         f"lr={learning_rate}, "
@@ -273,271 +260,277 @@ def deep_learning_prediction(pipeline: Any) -> None:
     )
 
     # ---------- Step 1: Load pipeline inputs ---------- #
-    historical_data = pipeline.get_data("historical_data")
-    if not historical_data:
+    historical_data = pipeline.get_data("historical_data") # Historical draw records used for labels and prefix stats
+    if not historical_data: # If missing/empty history, cannot train anything meaningful
         pipeline.add_data(
-            "deep_learning_predictions",
-            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL
+            "deep_learning_predictions", # Store result into pipeline
+            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL # Uniform fallback (no information)
         )
-        return
+        return # Exit early
 
-    monte_carlo = pipeline.get_data("monte_carlo")
-    redundancy = pipeline.get_data("redundancy")
-    markov = pipeline.get_data("markov_features")
-    entropy = pipeline.get_data("entropy_features")
-    fusion_norm = pipeline.get_data("bayesian_fusion_norm")
-    clusters = pipeline.get_data("clusters")
-    centroids = pipeline.get_data("centroids")
+    monte_carlo = pipeline.get_data("monte_carlo") # Probabilities from Monte Carlo stage
+    redundancy = pipeline.get_data("redundancy") # Probabilities from redundancy/coverage stage
+    markov = pipeline.get_data("markov_features") # Probabilities from Markov stage
+    entropy = pipeline.get_data("entropy_features") # Probabilities from entropy stage
+    fusion_norm = pipeline.get_data("bayesian_fusion_norm") # Bayesian fused and normalised probabilities
+    clusters = pipeline.get_data("clusters") # Cluster assignment vector (per number)
+    centroids = pipeline.get_data("centroids") # Centroid-related vector (per number)
 
-    required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids]
-    if any(v is None for v in required):
-        logging.error("Deep learning aborted: missing required pipeline features.")
+    required = [monte_carlo, redundancy, markov, entropy, fusion_norm, clusters, centroids] # All required inputs
+    if any(v is None for v in required): # Abort if any upstream feature missing
+        logging.error("Deep learning aborted: missing required pipeline features.") # Emit diagnostics
         pipeline.add_data(
-            "deep_learning_predictions",
-            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL
+            "deep_learning_predictions", # Store fallback into pipeline
+            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL # Uniform fallback
         )
-        return
+        return # Exit early
 
     # ---------- Step 2: Build strict multi-hot labels ---------- #
-    labels = []
-    for draw in historical_data:
-        y = np.zeros(NUM_TOTAL, dtype=float)
-        for n in draw.get("numbers", []):
-            if isinstance(n, int) and 1 <= n <= NUM_MAIN:
-                y[n - 1] = 1.0
-        pb = draw.get("powerball")
-        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:
-            y[NUM_MAIN + pb - 1] = 1.0
-        elif isinstance(pb, (list, tuple)):
-            for p in pb:
-                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:
-                    y[NUM_MAIN + p - 1] = 1.0
-        labels.append(y)
+    labels = [] # Will hold one 50-dim multi-hot vector per historical draw
+    for draw in historical_data: # Iterates over draw dicts
+        y = np.zeros(NUM_TOTAL, dtype=float) # Allocates empty label vector
+        for n in draw.get("numbers", []): # Pulls main number list; default empty
+            if isinstance(n, int) and 1 <= n <= NUM_MAIN: # Validate as integer and in range
+                y[n - 1] = 1.0 # Converts 1-based lotto number to 0-based index
+        pb = draw.get("powerball") # Reads powerball field
+        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL: # Single powerball integer
+            y[NUM_MAIN + pb - 1] = 1.0 # Map to indices 40..49 (0-based)
+        elif isinstance(pb, (list, tuple)): # Some sources may store multiple PBs
+            for p in pb: # Iterates PB list/tuple
+                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL: # Validate range
+                    y[NUM_MAIN + p - 1] = 1.0 # Set PB index as active
+        labels.append(y) # Stores label vector for this draw
 
-    Y = np.asarray(labels, dtype=float)
-    n_draws = Y.shape[0]
-    if n_draws < 10:
+    Y = np.asarray(labels, dtype=float) # Stack labels into shape (n_draws, 50)
+    n_draws = Y.shape[0] # Number of historical examples available
+    if n_draws < 10: # Too little data to reasonably train
         pipeline.add_data(
-            "deep_learning_predictions",
-            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL
+            "deep_learning_predictions", # Store fallback
+            np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL # Uniform distribution
         )
-        return
+        return # Exit early
 
     # ---------- Step 3: Normalise pipeline vectors ---------- #
-    mc = _prob_norm_vec(monte_carlo, "monte_carlo")
-    rd = _prob_norm_vec(redundancy, "redundancy")
-    mk = _prob_norm_vec(markov, "markov_features")
-    en = _prob_norm_vec(entropy, "entropy_features")
-    fn = _prob_norm_vec(fusion_norm, "bayesian_fusion_norm")
-    clusters = np.asarray(clusters, dtype=float).ravel()
-    centroids = np.asarray(centroids, dtype=float).ravel()
+    mc = _prob_norm_vec(monte_carlo, "monte_carlo") # Ensure valid probability vector
+    rd = _prob_norm_vec(redundancy, "redundancy") # Ensure valid probability vector
+    mk = _prob_norm_vec(markov, "markov_features") # Ensure valid probability vector
+    en = _prob_norm_vec(entropy, "entropy_features") # Ensure valid probability vector
+    fn = _prob_norm_vec(fusion_norm, "bayesian_fusion_norm") # Ensure valid probability vector
+    clusters_arr = np.asarray(clusters, dtype=float).ravel() # Force to flat float vector
+    centroids_arr = np.asarray(centroids, dtype=float).ravel() # Force to flat float vector
 
-    if clusters.size != NUM_TOTAL:
-        clusters = np.zeros(NUM_TOTAL, dtype=float)
-    if centroids.size != NUM_TOTAL:
-        centroids = np.zeros(NUM_TOTAL, dtype=float)
+    if clusters_arr.size != NUM_TOTAL: # If wrong size, discard rather than misalign features
+        clusters_arr = np.zeros(NUM_TOTAL, dtype=float) # Replace with zeros to preserve dimensions
+    if centroids_arr.size != NUM_TOTAL: # If wrong size, discard rather than misalign features
+        centroids_arr = np.zeros(NUM_TOTAL, dtype=float) # Replace with zeros to preserve dimensions
 
     # ---------- Step 4: Build causal prefix frequencies ---------- #
-    F = np.zeros((n_draws, NUM_TOTAL), dtype=float)
-    counts = np.zeros(NUM_TOTAL, dtype=float)
-    for t in range(n_draws):
-        s = counts.sum()
-        F[t] = counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL
-        for n in historical_data[t].get("numbers", []):
-            if isinstance(n, int) and 1 <= n <= NUM_MAIN:
-                counts[n - 1] += 1.0
-        pb = historical_data[t].get("powerball")
-        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL:
-            counts[NUM_MAIN + pb - 1] += 1.0
-        elif isinstance(pb, (list, tuple)):
-            for p in pb:
-                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL:
-                    counts[NUM_MAIN + p - 1] += 1.0
+    F = np.zeros((n_draws, NUM_TOTAL), dtype=float) # One frequency vector per timestep (before seeing that draw)
+    counts = np.zeros(NUM_TOTAL, dtype=float) # Running occurrence counts up to time t-1
+    for t in range(n_draws): # Walk forward through history
+        s = counts.sum() # Total counts so far
+        F[t] = counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL # Convert counts to frequencies or uniform
+        for n in historical_data[t].get("numbers", []): # Adds numbers from the current draw into counts
+            if isinstance(n, int) and 1 <= n <= NUM_MAIN: # Validate main number
+                counts[n - 1] += 1.0 # Increments main number count
+        pb = historical_data[t].get("powerball") # Reads powerball for this draw
+        if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL: # Single PB integer
+            counts[NUM_MAIN + pb - 1] += 1.0 # Increments PB count
+        elif isinstance(pb, (list, tuple)): # Multiple PBs
+            for p in pb: # Iterates PB list/tuple
+                if isinstance(p, int) and 1 <= p <= NUM_POWERBALL: # Validate PB
+                    counts[NUM_MAIN + p - 1] += 1.0 # Increments PB count
 
     # ---------- Step 5: Classical feature matrix (Future-Proof) ---------- #
-    # Uses the central definition so the feature order stays consistent
-    # with the ablation logic in _compute_pipe_importance.
-    feature_blocks = _get_classical_feature_arrays(mc, rd, mk, en, fn, centroids, clusters)
-
-    X_parts = []
-    for name, arr in feature_blocks:
-        if name in ["centroids", "clusters"]:
-            X_parts.append(np.tile(arr.reshape(1, -1), (n_draws, 1)))
-        else:
-            X_parts.append(F * arr.reshape(1, -1))
-
-    X = np.column_stack(X_parts).astype(float)
+    feature_blocks = _get_classical_feature_arrays( # Get blocks in canonical order
+        mc, rd, mk, en, fn, centroids_arr, clusters_arr
+    )
+    X = _build_feature_matrix(F, feature_blocks) # Build matrix using central helper (keeps train/inference identical)
 
     # ---------- Step 6: Time-aware train/validation split ---------- #
-    n_val = max(1, int(0.15 * n_draws))
-    X_train, X_val = X[:-n_val], X[-n_val:]
-    Y_train, Y_val = Y[:-n_val], Y[-n_val:]
+    n_val = max(1, int(0.15 * n_draws)) # Validation is the last ~15% of history (at least 1 example)
+    X_train, X_val = X[:-n_val], X[-n_val:] # Train on early history, validate on most recent history
+    Y_train, Y_val = Y[:-n_val], Y[-n_val:] # Same split for labels
 
     # ---------- Step 7: Compute global class weights ---------- #
-    pos = Y_train.sum(axis=0)
-    neg = Y_train.shape[0] - pos
-    cw = neg / (pos + MIN_PROB)
-    cw = np.clip(cw, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT).astype(np.float32)
-    class_weights = cw
-    class_weights_tf = tf.constant(class_weights, dtype=tf.float32)
+    pos = Y_train.sum(axis=0) # Positive counts per class across training set
+    neg = Y_train.shape[0] - pos # Negative counts per class
+    cw = neg / (pos + MIN_PROB) # Ratio-based positive class weight (avoid div-by-zero)
+    cw = np.clip(cw, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT).astype(np.float32) # Clamp to keep gradients sane
+    class_weights = cw # Store NumPy version globally for loss
+    class_weights_tf = tf.constant(class_weights, dtype=tf.float32) # Store TF constant version for loss
 
     # ---------- Step 8: Train quantum encoder + reset kernel cache ---------- #
     try:
-        train_quantum_encoder(X_train, Y_train)
-        logging.info("Quantum encoder training complete.")
+        train_quantum_encoder(X_train, Y_train) # Fit/tune the quantum encoder using training data only
+        logging.info("Quantum encoder training complete.") # Confirm completion
     except Exception as e:
-        logging.warning(f"Quantum encoder training failed: {e}")
-
-    _reset_quantum_kernel_cache()
+        logging.warning(f"Quantum encoder training failed: {e}") # Continue even if quantum training fails
+    _reset_quantum_kernel_cache() # Ensure kernel prototypes are rebuilt under latest encoder weights
 
     # ---------- Step 9: Compute quantum and kernel features ---------- #
     try:
-        Q_train = _force_width(
-            compute_quantum_matrix(X_train),
-            QUANTUM_FEATURE_LEN,
-            "Q_train"
+        Q_train = _force_width( # Ensure quantum feature matrix has fixed width
+            compute_quantum_matrix(X_train), # Quantum feature extraction on training matrix
+            QUANTUM_FEATURE_LEN, # Expected width from quantum feature extractor
+            "Q_train" # Name used for error messages
         )
-        Q_val = _force_width(
-            compute_quantum_matrix(X_val),
-            QUANTUM_FEATURE_LEN,
-            "Q_val"
+        Q_val = _force_width( # Ensure quantum feature matrix has fixed width
+            compute_quantum_matrix(X_val), # Quantum feature extraction on validation matrix
+            QUANTUM_FEATURE_LEN, # Expected width from quantum feature extractor
+            "Q_val" # Name used for error messages
         )
     except Exception as e:
-        logging.error(f"Quantum feature computation failed: {e}")
-        Q_train = np.zeros((X_train.shape[0], QUANTUM_FEATURE_LEN))
-        Q_val = np.zeros((X_val.shape[0], QUANTUM_FEATURE_LEN))
+        logging.error(f"Quantum feature computation failed: {e}") # Report quantum feature failure
+        Q_train = np.zeros((X_train.shape[0], QUANTUM_FEATURE_LEN)) # Fallback to zeros with correct shape
+        Q_val = np.zeros((X_val.shape[0], QUANTUM_FEATURE_LEN)) # Fallback to zeros with correct shape
 
     try:
-        K_train_raw = build_quantum_kernel_features(
-            X_train, num_prototypes=KERNEL_PROTOTYPES, seed=1337
+        K_train_raw = build_quantum_kernel_features( # Compute kernel features for training set
+            X_train, # Use training examples (defines prototype cache)
+            num_prototypes=KERNEL_PROTOTYPES, # Requested number of prototypes / output width
+            seed=1337 # Deterministic prototype selection/reproducibility
         )
-        K_val_raw = build_quantum_kernel_features(
-            X_val, num_prototypes=KERNEL_PROTOTYPES, seed=1337
+        K_val_raw = build_quantum_kernel_features( # Compute kernel features for validation set
+            X_val, # Validation examples mapped against same cached prototypes
+            num_prototypes=KERNEL_PROTOTYPES, # Output width
+            seed=1337 # Seed matches to ensure cache compatibility
         )
-        K_train = _force_width(K_train_raw, KERNEL_PROTOTYPES, "K_train")
-        K_val = _force_width(K_val_raw, KERNEL_PROTOTYPES, "K_val")
+        K_train = _force_width(K_train_raw, KERNEL_PROTOTYPES, "K_train") # Enforce fixed width on training kernel feats
+        K_val = _force_width(K_val_raw, KERNEL_PROTOTYPES, "K_val") # Enforce fixed width on validation kernel feats
     except Exception as e:
-        logging.error(f"Kernel feature computation failed: {e}")
-        K_train = np.zeros((X_train.shape[0], KERNEL_PROTOTYPES))
-        K_val = np.zeros((X_val.shape[0], KERNEL_PROTOTYPES))
+        logging.error(f"Kernel feature computation failed: {e}") # Report kernel feature failure
+        K_train = np.zeros((X_train.shape[0], KERNEL_PROTOTYPES)) # Fallback zero kernel features (train)
+        K_val = np.zeros((X_val.shape[0], KERNEL_PROTOTYPES)) # Fallback zero kernel features (val)
 
-    Xf_train = np.column_stack((X_train, Q_train, K_train)).astype(float)
-    Xf_val = np.column_stack((X_val, Q_val, K_val)).astype(float)
-    input_dim = Xf_train.shape[1]
+    Xf_train = np.column_stack((X_train, Q_train, K_train)).astype(float) # Fuse classical + quantum + kernel (train)
+    Xf_val = np.column_stack((X_val, Q_val, K_val)).astype(float) # Fuse classical + quantum + kernel (val)
+    input_dim = Xf_train.shape[1] # Store final fused feature width for model input validation
 
     # ---------- Step 10: Train-only data augmentation ---------- #
-    Xa = [Xf_train]
-    Ya = [Y_train]
-    for _ in range(DATA_AUGMENTATION_ROUNDS):
-        Xa.append(Xf_train + np.random.normal(0.0, NOISE_STDDEV, Xf_train.shape))
-        Ya.append(Y_train)
-    Xa = np.vstack(Xa).astype(float)
-    Ya = np.vstack(Ya).astype(float)
+    Xa = [Xf_train] # List of training matrices to stack (original + noisy versions)
+    Ya = [Y_train] # Labels duplicated for each augmented copy
+    for _ in range(DATA_AUGMENTATION_ROUNDS): # Generate multiple noisy copies of training data
+        Xa.append(Xf_train + np.random.normal(0.0, NOISE_STDDEV, Xf_train.shape)) # Add Gaussian noise in feature space
+        Ya.append(Y_train) # Keep labels unchanged (noise is only on features)
+    Xa = np.vstack(Xa).astype(float) # Stack augmented training matrices vertically
+    Ya = np.vstack(Ya).astype(float) # Stack labels to match augmented rows
 
     # ---------- Step 11: Model definition ---------- #
-    model = keras.Sequential([
-        keras.layers.Input(shape=(input_dim,)),
-        keras.layers.Dense(128, activation="relu"),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(0.25),
-        keras.layers.Dense(64, activation="relu"),
-        keras.layers.BatchNormalization(),
-        keras.layers.Dropout(dropout_rate),
-        keras.layers.Dense(32, activation="relu"),
-        keras.layers.Dense(NUM_TOTAL, activation="sigmoid"),
-    ])
+    model = keras.Sequential( # Simple feedforward network for tabular fused features
+        [
+            keras.layers.Input(shape=(input_dim,)), # Define input layer shape explicitly
+            keras.layers.Dense(128, activation="relu"), # First dense layer (128 units)
+            keras.layers.BatchNormalization(), # BatchNorm to stabilise hidden activations
+            keras.layers.Dropout(0.25), # Prevent memorising historical draws
+            keras.layers.Dense(64, activation="relu"), # Second dense layer (64 units)
+            keras.layers.BatchNormalization(), # BatchNorm again
+            keras.layers.Dropout(dropout_rate), # Regularisation (from Optuna or default)
+            keras.layers.Dense(32, activation="relu"), # Third dense layer (32 units)
+            keras.layers.Dense(NUM_TOTAL, activation="sigmoid"), # Output layer: independent probs per class (multi-label)
+        ]
+    )
 
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=weighted_bce,
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0), # Adam with resolved LR + gradient clipping
+        loss=weighted_bce, # Custom weighted BCE loss defined above
         metrics=[
-            keras.metrics.AUC(multi_label=True, num_labels=NUM_TOTAL, name="auc"),
-            keras.metrics.BinaryAccuracy(name="bin_acc"),
-            keras.metrics.MeanAbsoluteError(name="mae"),
+            keras.metrics.AUC(multi_label=True, num_labels=NUM_TOTAL, name="auc"), # Multi-label AUC
+            keras.metrics.BinaryAccuracy(name="bin_acc"), # Thresholded accuracy
+            keras.metrics.MeanAbsoluteError(name="mae"), # MAE across probabilities
         ],
     )
 
     # ---------- Step 12: Training ---------- #
     model.fit(
-        Xa, Ya,
-        epochs=epochs,
-        batch_size=batch_size,
-        validation_data=(Xf_val, Y_val),
+        Xa, # Augmented training feature matrix (original + noisy copies)
+        Ya, # Augmented training labels (duplicated to match Xa)
+        epochs=epochs, # Resolved number of epochs (Optuna or dynamic)
+        batch_size=batch_size, # Resolved batch size (Optuna or default)
+        validation_data=(Xf_val, Y_val), # Validation uses clean (non-augmented) fused features
         callbacks=[
             keras.callbacks.ReduceLROnPlateau(
-                monitor="val_auc", mode="max", factor=0.7,
-                patience=8, min_lr=5e-6, verbose=1
+                monitor="val_auc", # Watch validation AUC
+                mode="max", # Higher is better
+                factor=0.7, # Multiply LR by this factor when plateau detected
+                patience=8, # Epochs to wait before reducing LR
+                min_lr=5e-6, # Lower bound on learning rate
+                verbose=1, # Prints when LR is reduced
             ),
             keras.callbacks.EarlyStopping(
-                monitor="val_auc", mode="max", patience=15,
-                min_delta=0.0003, restore_best_weights=True, verbose=1
+                monitor="val_auc", # Uses val_auc instead of val_loss
+                mode="max", # Higher AUC is better
+                patience=15, # Epochs to wait before stopping
+                min_delta=0.0003, # Minimum improvement required to reset patience
+                restore_best_weights=True, # Restores best weights by val_auc
+                verbose=1, # Print stop reason
             ),
-            EpochLogger(),
+            EpochLogger(), # Custom callback for epoch logging
         ],
-        verbose=1,
+        verbose=1, # Prints training progress per epoch
     )
 
     # ===================== NEW: Post-training Pipe Importance ===================== #
     try:
-        pipe_importance = _compute_pipe_importance(model, Xf_val, Y_val)
-        pipeline.add_data("pipe_importance", pipe_importance)
+        pipe_importance = _compute_pipe_importance(model, Xf_val, Y_val) # Run ablation analysis
+        pipeline.add_data("pipe_importance", pipe_importance) # Store for Optuna bridge consumption
         logging.info("Post-training pipe importance analysis completed successfully.")
     except Exception as e:
         logging.error(f"Pipe importance calculation FAILED: {e}")
         logging.error("Storing empty dict so bridge does not crash.")
-        pipeline.add_data("pipe_importance", {})
+        pipeline.add_data("pipe_importance", {}) # Safe fallback
 
     # ---------- Step 13: Inference ---------- #
-    s = counts.sum()
-    f_now = (counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL
-             ).reshape(1, -1).astype(float)
+    s = counts.sum() # Total counts after processing all historical draws
+    f_now = ( # Construct current frequency vector (post-history)
+        counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL # Normalised counts or uniform fallback
+    ).reshape(1, -1).astype(float) # Convert to row vector for feature construction
 
-    x_now = np.column_stack((
-        f_now * mc.reshape(1, -1),
-        f_now * rd.reshape(1, -1),
-        f_now * mk.reshape(1, -1),
-        f_now * en.reshape(1, -1),
-        f_now * fn.reshape(1, -1),
-        centroids.reshape(1, -1),
-        clusters.reshape(1, -1),
-    )).astype(float)
+    feature_blocks_now = _get_classical_feature_arrays( # Get blocks in canonical order for inference
+        mc, rd, mk, en, fn, centroids_arr, clusters_arr
+    )
+    x_now = _build_feature_matrix(f_now, feature_blocks_now) # Build current classical feature row using same helper
 
     try:
-        q_now = _force_width(
-            compute_quantum_matrix(x_now), QUANTUM_FEATURE_LEN, "q_now"
+        q_now = _force_width( # Ensure quantum feature width matches training expectation
+            compute_quantum_matrix(x_now), # Compute quantum features for current row
+            QUANTUM_FEATURE_LEN, # Expected width
+            "q_now" # Name for diagnostics
         )
     except Exception:
-        q_now = np.zeros((1, QUANTUM_FEATURE_LEN))
+        q_now = np.zeros((1, QUANTUM_FEATURE_LEN)) # Fallback to zeros if quantum feature step fails
 
     try:
-        k_now_raw = build_quantum_kernel_features(
-            x_now, num_prototypes=KERNEL_PROTOTYPES, seed=1337
+        k_now_raw = build_quantum_kernel_features( # Compute kernel features for current row
+            x_now, # Current classical features
+            num_prototypes=KERNEL_PROTOTYPES, # Output width
+            seed=1337 # Seed must match cache semantics used earlier
         )
-        k_now = _force_width(k_now_raw, KERNEL_PROTOTYPES, "k_now")
+        k_now = _force_width(k_now_raw, KERNEL_PROTOTYPES, "k_now") # Enforce fixed kernel feature width
     except Exception:
-        k_now = np.zeros((1, KERNEL_PROTOTYPES))
+        k_now = np.zeros((1, KERNEL_PROTOTYPES)) # Fallback to zeros if kernel step fails
 
-    xf_now = np.column_stack((x_now, q_now, k_now)).astype(float)
+    xf_now = np.column_stack((x_now, q_now, k_now)).astype(float) # Fuse classical + quantum + kernel for inference
 
-    if xf_now.shape[1] != input_dim:
-        logging.error(f"Inference width mismatch: got {xf_now.shape[1]}, expected {input_dim}")
+    if xf_now.shape[1] != input_dim: # Hard check: inference feature width must match model input width
+        logging.error(
+            f"Inference width mismatch: got {xf_now.shape[1]}, expected {input_dim}" # Log exact mismatch
+        )
         pipeline.add_data(
-            "deep_learning_predictions",
-            np.ones(NUM_TOTAL) / NUM_TOTAL
+            "deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL # Uniform fallback
         )
-        return
+        return # Exit early to avoid invalid model input
 
     try:
-        dl_pred = model.predict(xf_now, verbose=0).reshape(-1).astype(float)
+        dl_pred = model.predict(xf_now, verbose=0).reshape(-1).astype(float) # Run prediction and flatten to (50,)
     except Exception as e:
-        logging.error(f"DL inference failed: {e}")
+        logging.error(f"DL inference failed: {e}") # Report inference failure
         pipeline.add_data(
-            "deep_learning_predictions",
-            np.ones(NUM_TOTAL) / NUM_TOTAL
+            "deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL # Uniform fallback
         )
-        return
+        return # Exit early
 
     pipeline.add_data(
-        "deep_learning_predictions",
-        _prob_norm_vec(np.clip(dl_pred, 0.0, 1.0), "deep_learning_predictions")
+        "deep_learning_predictions", # Store output in pipeline
+        _prob_norm_vec(np.clip(dl_pred, 0.0, 1.0), "deep_learning_predictions") # Ensure final probabilities are within [0, 1] and sum to 1
     )
