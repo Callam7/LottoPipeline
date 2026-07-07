@@ -26,7 +26,6 @@ from typing import Any, Dict, List, Tuple # Type hints for clarity and static ch
 import numpy as np # Core numerical array library used throughout
 import tensorflow as tf # TensorFlow backend used for training and tensor ops
 from tensorflow import keras # Keras API for model definition/training
-
 from config.logs import EpochLogger # Custom callback to log epoch progress cleanly
 from pipeline import get_dynamic_params # Dynamic training params (supports Optuna overrides)
 from config.quantum_features import ( # Imports quantum feature utilities/constants
@@ -428,7 +427,8 @@ def deep_learning_prediction(pipeline: Any) -> None:
             keras.layers.Dropout(dropout_rate), # Regularisation (from Optuna or default)
             keras.layers.Dense(32, activation="relu"), # Third dense layer (32 units)
             keras.layers.Dense(NUM_TOTAL, activation="sigmoid"), # Output layer: independent probs per class (multi-label)
-        ]
+
+            ]
     )
 
     model.compile(
@@ -450,21 +450,30 @@ def deep_learning_prediction(pipeline: Any) -> None:
         validation_data=(Xf_val, Y_val), # Validation uses clean (non-augmented) fused features
         callbacks=[
             keras.callbacks.ReduceLROnPlateau(
-                monitor="val_auc", # Watch validation AUC
-                mode="max", # Higher is better
-                factor=0.7, # Multiply LR by this factor when plateau detected
-                patience=8, # Epochs to wait before reducing LR
+                monitor="val_loss", # Watch validation loss
+                mode="min", # less is better
+                factor=0.6, # Multiply LR by this factor when plateau detected
+                patience=6, # Epochs to wait before reducing LR
                 min_lr=5e-6, # Lower bound on learning rate
                 verbose=1, # Prints when LR is reduced
             ),
             keras.callbacks.EarlyStopping(
-                monitor="val_auc", # Uses val_auc instead of val_loss
-                mode="max", # Higher AUC is better
-                patience=15, # Epochs to wait before stopping
-                min_delta=0.0003, # Minimum improvement required to reset patience
+                monitor="val_loss", # Uses val_auc instead of val_loss
+                mode="min", # lower AUC is better
+                patience=12, # Epochs to wait before stopping
+                min_delta=0.0005, # Minimum improvement required to reset patience
                 restore_best_weights=True, # Restores best weights by val_auc
                 verbose=1, # Print stop reason
             ),
+            keras.callbacks.EarlyStopping(
+                monitor="val_auc",
+                mode="max",
+                patience=20,
+                min_delta=0.001,
+                restore_best_weights=False,
+                verbose=0,
+                ),
+
             EpochLogger(), # Custom callback for epoch logging
         ],
         verbose=1, # Prints training progress per epoch
