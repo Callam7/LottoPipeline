@@ -67,9 +67,22 @@ class DataPipeline:
             "centroids": True
         }
 
+        # Observer support for RuntimeObserver
+        self._observers: List[Any] = []
+
         logging.info("Initialized DataPipeline.")
 
+    def register_observer(self, observer):
+        """Register a runtime observer (e.g. RuntimeObserver)."""
+        if observer not in self._observers:
+            self._observers.append(observer)
+            logging.info(f"Observer registered: {type(observer).__name__}")
 
+    def _notify_add_data(self, key: str, value: Any):
+        """Internal: notify all observers when data is added."""
+        for obs in self._observers:
+            if hasattr(obs, "record_add_data"):
+                obs.record_add_data(key, value)
 
     def add_data(self, key: str, value: Any) -> None:
         """
@@ -82,6 +95,7 @@ class DataPipeline:
         if key is None:
             raise ValueError("Pipeline key cannot be None.")
         self.data[key] = value  # Store data
+        self._notify_add_data(key, value)  # Notify observers
         logging.debug(f"Added data under key '{key}'.")
 
     def get_data(self, key: str) -> Any:

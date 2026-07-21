@@ -24,6 +24,7 @@ import logging # Standard Python logging
 from typing import Any, Dict, List, Tuple # Type hints for clarity and static checking
 
 import numpy as np # Core numerical array library used throughout
+from adaptor.ablation import compute_post_training_pipe_importance, get_most_impactful_pipe
 import tensorflow as tf # TensorFlow backend used for training and tensor ops
 from tensorflow import keras # Keras API for model definition/training
 from config.logs import EpochLogger # Custom callback to log epoch progress cleanly
@@ -174,68 +175,6 @@ def _build_feature_matrix(
             X_parts.append(F * arr) # Multiply prefix frequencies by the probability vector
     return np.column_stack(X_parts).astype(float) # Concatenate all blocks horizontally → final classical feature matrix
 
-# ===================== Post-training Pipe Importance (Clean) ===================== #
-def _compute_pipe_importance(
-    model: keras.Model, # Trained Keras model
-    Xf_val: np.ndarray, # Validation fused features
-    Y_val: np.ndarray, # Validation labels
-) -> Dict[str, float]:
-    """
-    Post-training ablation using CLASSICAL_FEATURE_BLOCKS as single source of truth.
-    Zeros each classical feature block one-by-one and measures change in macro AUC.
-    Negative delta = pipe was useful (removing it hurt performance).
-    """
-    if roc_auc_score is None: # sklearn not installed
-        logging.warning("sklearn not available - skipping pipe importance analysis.")
-        return {}
-
-    block_size = NUM_TOTAL # Each pipe block is 50 columns wide
-    pipes: Dict[str, Tuple[int, int]] = {} # name -> (start_col, end_col)
-    for i, name in enumerate(CLASSICAL_FEATURE_BLOCKS): # Build column ranges from the single source of truth
-        start = i * block_size
-        end = start + block_size
-        pipes[name] = (start, end)
-
-    # Baseline prediction and AUC
-    baseline_pred = model.predict(Xf_val, verbose=0) # Get predictions on clean validation set
-    try:
-        baseline_auc = roc_auc_score(Y_val, baseline_pred, average="macro") # Macro AUC across all 50 labels
-    except Exception:
-        baseline_auc = 0.5 # Fallback if AUC cannot be computed
-
-    importance: Dict[str, float] = {} # Will store delta per pipe
-
-    print("\n" + "=" * 72)
-    print("POST-TRAINING PIPE IMPORTANCE ANALYSIS (future-proof)")
-    print("=" * 72)
-    print(f"Baseline Validation AUC: {baseline_auc:.4f}")
-    print("-" * 72)
-    print(f"{'Pipe Name':<28} {'Delta (Impact)':>16}")
-    print("-" * 72)
-
-    for pipe_name, (start_col, end_col) in pipes.items(): # Iterate in defined order
-        X_modified = Xf_val.copy() # Work on a copy so we don't corrupt original
-        X_modified[:, start_col:end_col] = 0.0 # Zero out this entire pipe block
-
-        modified_pred = model.predict(X_modified, verbose=0) # Predict with this pipe removed
-        try:
-            modified_auc = roc_auc_score(Y_val, modified_pred, average="macro")
-        except Exception:
-            modified_auc = baseline_auc
-
-        delta = modified_auc - baseline_auc # Negative delta = this pipe helped performance
-        importance[pipe_name] = float(delta)
-        print(f"{pipe_name:<28} {delta:>16.4f}")
-
-    most_impactful = min(importance, key=importance.get) # Most negative delta = largest contribution
-    print("-" * 72)
-    print(
-        f"Most impactful pipe (largest contribution / most negative delta): "
-        f"{most_impactful} (delta={importance[most_impactful]:.4f})"
-    )
-    print("=" * 72 + "\n")
-
-    return importance # Return dict for Optuna bridge consumption
 
 # ===================== Main entry ===================== #
 def deep_learning_prediction(pipeline: Any) -> None:
@@ -478,16 +417,19 @@ def deep_learning_prediction(pipeline: Any) -> None:
         ],
         verbose=1, # Prints training progress per epoch
     )
-
-    # ===================== NEW: Post-training Pipe Importance ===================== #
+    
+    # ===================== Post-training Pipe Importance (moved to ablation.py) ===================== #
     try:
-        pipe_importance = _compute_pipe_importance(model, Xf_val, Y_val) # Run ablation analysis
-        pipeline.add_data("pipe_importance", pipe_importance) # Store for Optuna bridge consumption
-        logging.info("Post-training pipe importance analysis completed successfully.")
+        pipe_importance = compute_post_training_pipe_importance(model, Xf_val, Y_val)
+        pipeline.add_data("pipe_importance", pipe_importance)
+
+        weakest_pipe = get_most_impactful_pipe(pipe_importance)
+        if weakest_pipe:
+            pipeline.add_data("weakest_pipe", weakest_pipe)
+            logging.info(f"Most impactful/weakest pipe identified: {weakest_pipe}")
     except Exception as e:
-        logging.error(f"Pipe importance calculation FAILED: {e}")
-        logging.error("Storing empty dict so bridge does not crash.")
-        pipeline.add_data("pipe_importance", {}) # Safe fallback
+        logging.error(f"Pipe importance analysis failed: {e}")
+        pipeline.add_data("pipe_importance", {})
 
     # ---------- Step 13: Inference ---------- #
     s = counts.sum() # Total counts after processing all historical draws
