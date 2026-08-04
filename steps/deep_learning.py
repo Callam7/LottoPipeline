@@ -18,8 +18,9 @@ Pipeline stages:
     5) Compute quantum kernel features (fidelity-based).
     6) Fuse classical + quantum + kernel features.
     7) Train deep learning model on fused features.
-    8) Post-training pipe importance ablation (for Optuna bridge).
+    8) Call external ablation module for post-training pipe importance analysis.
 """
+
 import logging # Standard Python logging
 from typing import Any, Dict, List, Tuple # Type hints for clarity and static checking
 
@@ -37,11 +38,6 @@ from config.quantum_features import ( # Imports quantum feature utilities/consta
 from config import quantum_kernels as qk # Imports module itself (to access cache vars)
 from config.quantum_kernels import build_quantum_kernel_features # Builds kernel features
 
-# Optional sklearn import moved to top for cleanliness
-try:
-    from sklearn.metrics import roc_auc_score # Used only inside pipe importance function
-except ImportError:
-    roc_auc_score = None # Graceful fallback if sklearn missing
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s") # Set log format/level
 

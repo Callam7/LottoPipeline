@@ -2,9 +2,9 @@
 # Project: Lotto Generator
 # Purpose: Dedicated Post-Training Ablation & Pipe Importance Module
 # Description:
-#   - Performs post-training feature-block ablation analysis
+#   - Performs post-training grouped permutation importance analysis
 #   - Measures the contribution of each classical pipeline component
-#     on validation performance (primarily macro AUC)
+#     by shuffling entire feature blocks and observing the drop in macro AUC
 #   - Designed as a clean partner to optuna_bridge.py and RuntimeObserver
 #   - Completely decoupled from deep_learning.py training logic
 #   - Uses CLASSICAL_FEATURE_BLOCKS as single source of truth for ordering
@@ -36,14 +36,19 @@ def compute_post_training_pipe_importance(
     Xf_val: np.ndarray,
     Y_val: np.ndarray,
     pipe_feature_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
+    n_repeats: int = 10,
 ) -> Dict[str, float]:
     """
-    Performs post-training ablation by zeroing each classical feature block
-    one-by-one and measuring the change in macro AUC.
+    Performs post-training grouped permutation importance analysis.
 
-    Negative delta = the pipe contributed positively to performance.
-    This function replaces the inline _compute_pipe_importance that previously
-    lived inside deep_learning.py.
+    For each classical feature block (pipe):
+      - The entire block is randomly shuffled multiple times.
+      - The resulting drop in macro AUC is measured.
+      - Higher positive importance = the model relies more on that pipe.
+
+    This is the standard, model-agnostic method recommended by
+    scikit-learn and the broader interpretability literature
+    (Breiman 2001, Fisher et al. 2019, and subsequent group variants).
 
     Args:
         model: Trained Keras model.
@@ -52,9 +57,11 @@ def compute_post_training_pipe_importance(
         pipe_feature_ranges: Optional override of column ranges.
                              If None, ranges are built automatically from
                              CLASSICAL_FEATURE_BLOCKS (each block = 50 columns).
+        n_repeats: Number of random shuffles per pipe (default 10).
 
     Returns:
-        Dict[str, float]: {pipe_name: delta_auc}
+        Dict[str, float]: {pipe_name: mean_importance}
+                          where importance = baseline_auc - mean(shuffled_auc)
     """
     if roc_auc_score is None:
         logging.warning("sklearn not available — skipping pipe importance analysis.")
@@ -79,42 +86,56 @@ def compute_post_training_pipe_importance(
     importance: Dict[str, float] = {}
 
     print("\n" + "=" * 72)
-    print("POST-TRAINING PIPE IMPORTANCE ANALYSIS")
+    print("POST-TRAINING GROUPED PERMUTATION IMPORTANCE ANALYSIS")
     print("=" * 72)
     print(f"Baseline Validation AUC: {baseline_auc:.4f}")
+    print(f"Repeats per pipe       : {n_repeats}")
     print("-" * 72)
-    print(f"{'Pipe Name':<28} {'Delta (Impact)':>16}")
+    print(f"{'Pipe Name':<28} {'Importance (drop)':>18}")
     print("-" * 72)
+
+    rng = np.random.default_rng(seed=42)  # Reproducible shuffles
 
     for pipe_name, (start_col, end_col) in pipe_feature_ranges.items():
-        X_modified = Xf_val.copy()
-        X_modified[:, start_col:end_col] = 0.0
+        drops = []
 
-        modified_pred = model.predict(X_modified, verbose=0)
-        try:
-            modified_auc = roc_auc_score(Y_val, modified_pred, average="macro")
-        except Exception:
-            modified_auc = baseline_auc
+        for _ in range(n_repeats):
+            X_shuffled = Xf_val.copy()
+            # Shuffle the entire block as a unit (grouped permutation)
+            block = X_shuffled[:, start_col:end_col].copy()
+            rng.shuffle(block, axis=0)
+            X_shuffled[:, start_col:end_col] = block
 
-        delta = modified_auc - baseline_auc
-        importance[pipe_name] = float(delta)
-        print(f"{pipe_name:<28} {delta:>16.4f}")
+            shuffled_pred = model.predict(X_shuffled, verbose=0)
+            try:
+                shuffled_auc = roc_auc_score(Y_val, shuffled_pred, average="macro")
+            except Exception:
+                shuffled_auc = baseline_auc
+
+            drops.append(baseline_auc - shuffled_auc)
+
+        mean_importance = float(np.mean(drops))
+        importance[pipe_name] = mean_importance
+        print(f"{pipe_name:<28} {mean_importance:>18.4f}")
 
     if importance:
-        most_impactful = min(importance, key=importance.get)
+        most_impactful = max(importance, key=importance.get)
         print("-" * 72)
         print(
-            f"Most impactful pipe (largest negative delta): "
-            f"{most_impactful} (delta={importance[most_impactful]:.4f})"
+            f"Most impactful pipe (largest positive importance): "
+            f"{most_impactful} (importance={importance[most_impactful]:.4f})"
         )
     print("=" * 72 + "\n")
 
-    logging.info("Post-training pipe importance analysis completed successfully.")
+    logging.info("Grouped permutation importance analysis completed successfully.")
     return importance
 
 
 def get_most_impactful_pipe(importance: Dict[str, float]) -> Optional[str]:
-    """Returns the pipe name with the most negative impact (weakest performing)."""
+    """
+    Returns the pipe with the highest positive importance
+    (the one the model relies on most).
+    """
     if not importance:
         return None
-    return min(importance, key=importance.get)
+    return max(importance, key=importance.get)

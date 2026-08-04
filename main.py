@@ -38,9 +38,10 @@ from steps.markov import markov_features
 from steps.entropy import shannon_entropy_features
 from steps.bayesian_fusion import bayesian_fusion_with_mechanics
 from steps.deep_learning import deep_learning_prediction
-
-#adaptor software import
+# Adaptor software imports
 from adaptor.optuna_bridge import run_optuna_bridge
+from adaptor.runtime_observer import RuntimeObserver
+from adaptor.assessment import PipelineAssessment
 
 # Constants
 NUM_PICK_MAIN = 6
@@ -133,6 +134,10 @@ def main():
     initialize_database()
     verify_draw_order()
     pipeline = DataPipeline()
+    observer = RuntimeObserver(pipeline)
+    # Creates the structural assessor once
+    assessor = PipelineAssessment()
+    assessor.discover_all_files()
 
     while True:
         print("\n--- Lotto Predictor Menu ---")
@@ -205,6 +210,7 @@ def main():
             # --- Full Pipeline Execution ---
             all_draws = fetch_all_draws()
             pipeline.clear_pipeline()
+            observer.start_new_run()                    
             pipeline.add_data("historical_data", all_draws)
 
             safe_run(lambda p: process_historical_data({"past_results": all_draws}, p), pipeline, "Historical Processing")
@@ -224,8 +230,7 @@ def main():
                 print(f"Line {idx}: {line['line']} | Powerball: {line['powerball']}")
             # === Run Optuna Bridge AFTER everything is complete ===
             # It will check the last 6 runs and suggest changes if needed
-            run_optuna_bridge(pipeline)
-
+            run_optuna_bridge(pipeline, assessor=assessor, observer=observer)
         elif choice == "4":
             view_number_stats(pipeline)
 
