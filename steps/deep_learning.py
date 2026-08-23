@@ -25,7 +25,7 @@ import logging # Standard Python logging
 from typing import Any, Dict, List, Tuple # Type hints for clarity and static checking
 
 import numpy as np # Core numerical array library used throughout
-from adaptor.ablation import compute_post_training_pipe_importance, get_most_impactful_pipe
+from adaptor.ablation import compute_post_training_pipe_importance, get_weak_link
 import tensorflow as tf # TensorFlow backend used for training and tensor ops
 from tensorflow import keras # Keras API for model definition/training
 from config.logs import EpochLogger # Custom callback to log epoch progress cleanly
@@ -56,9 +56,6 @@ MAX_CLASS_WEIGHT = 4.0 # Maximum positive-class weight
 MIN_PROB = 1e-7 # Used for clipping probabilities and avoiding divide-by-zero / log(0)
 
 KERNEL_PROTOTYPES = 24 # Number of kernel prototypes (feature width for K_*)
-
-class_weights = None # Numpy weights computed from training label imbalance
-class_weights_tf = None # TensorFlow constant version used inside loss
 
 # ===================== CLASSICAL FEATURE BLOCK DEFINITION (Future-Proof) ===================== #
 # Single source of truth for feature block order.
@@ -107,22 +104,24 @@ def _reset_quantum_kernel_cache():
     qk._cached_proto_states = None # Drops cached prototype statevectors
     qk._cached_num_prototypes = None # Drops cached prototype count
     qk._cached_seed = None # Drops cached seed (prototypes are seed-dependent)
+    
+# ===================== Weighted BCE (factory – no globals) ===================== #
+def make_weighted_bce(weights: np.ndarray):
+    """
+    Create a weighted BCE loss that closes over the supplied class weights.
+    This removes the previous global mutable state.
+    """
+    weights_tf = tf.constant(weights, dtype=tf.float32)
 
-# ===================== Weighted BCE ===================== #
-def weighted_bce(y_true, y_pred):
-    """
-    Stable weighted binary cross-entropy.
-    Key properties:
-        - NO label smoothing (preserves ranking signal)
-        - Positive-class weighting only
-        - y_pred clipped for numerical safety
-    """
-    y_true = tf.cast(y_true, tf.float32) # Loss math assumes float tensors
-    y_pred = tf.cast(y_pred, tf.float32) # Ensure predictions match dtype too
-    y_pred = tf.clip_by_value(y_pred, MIN_PROB, 1.0 - MIN_PROB) # Clamp to safe open interval (avoid log(0))
-    bce = keras.backend.binary_crossentropy(y_true, y_pred) # Elementwise BCE per label -> (batch, 50)
-    w = y_true * class_weights_tf + (1.0 - y_true) # Apply class weight only when y_true == 1, else weight = 1.0
-    return tf.reduce_mean(bce * w, axis=-1) # Mean across the 50 labels, keep batch dimension
+    def weighted_bce(y_true, y_pred):
+        y_true = tf.cast(y_true, tf.float32)
+        y_pred = tf.cast(y_pred, tf.float32)
+        y_pred = tf.clip_by_value(y_pred, MIN_PROB, 1.0 - MIN_PROB)
+        bce = keras.backend.binary_crossentropy(y_true, y_pred)
+        w = y_true * weights_tf + (1.0 - y_true)
+        return tf.reduce_mean(bce * w, axis=-1)
+
+    return weighted_bce
 
 # ===================== Shape utilities ===================== #
 def _ensure_2d(X: np.ndarray, name: str) -> np.ndarray:
@@ -158,23 +157,20 @@ def _prob_norm_vec(x: np.ndarray, name: str) -> np.ndarray:
     return x / s # Normalise so sum == 1.0
 
 def _build_feature_matrix(
-    F: np.ndarray, # Prefix frequency matrix (n_draws, 50)
-    feature_blocks: List[Tuple[str, np.ndarray]], # List of (name, vector) pairs in correct order
+    F: np.ndarray,  # Prefix frequency matrix (n_draws, 50)
+    feature_blocks: List[Tuple[str, np.ndarray]],
 ) -> np.ndarray:
-    """Centralized feature matrix builder to keep training and inference identical."""
-    X_parts = [] # Will hold each feature block before horizontal concatenation
-    for name, arr in feature_blocks: # Iterate in the order defined by CLASSICAL_FEATURE_BLOCKS
-        arr = arr.reshape(1, -1) # Ensure row vector shape (1, 50)
-        if name in ["centroids", "clusters"]: # These are static per-number vectors (not multiplied by F)
-            X_parts.append(np.tile(arr, (F.shape[0], 1))) # Repeat the vector for every historical timestep
-        else:
-            X_parts.append(F * arr) # Multiply prefix frequencies by the probability vector
-    return np.column_stack(X_parts).astype(float) # Concatenate all blocks horizontally → final classical feature matrix
-
+    """Centralized feature matrix builder to keep training and inference identical.
+    All classical blocks (including centroids/clusters) are interacted with F.
+    """
+    X_parts = []
+    for name, arr in feature_blocks:
+        arr = arr.reshape(1, -1)
+        X_parts.append(F * arr)
+    return np.column_stack(X_parts).astype(float)
 
 # ===================== Main entry ===================== #
 def deep_learning_prediction(pipeline: Any) -> None:
-    global class_weights, class_weights_tf # Allows loss function to access run-specific weights
 
     # Resolve dynamic training parameters (supports Optuna overrides)
     _, dynamic_epochs = get_dynamic_params( # Get dynamic epoch count based on data size
@@ -286,14 +282,14 @@ def deep_learning_prediction(pipeline: Any) -> None:
     X_train, X_val = X[:-n_val], X[-n_val:] # Train on early history, validate on most recent history
     Y_train, Y_val = Y[:-n_val], Y[-n_val:] # Same split for labels
 
-    # ---------- Step 7: Compute global class weights ---------- #
-    pos = Y_train.sum(axis=0) # Positive counts per class across training set
-    neg = Y_train.shape[0] - pos # Negative counts per class
-    cw = neg / (pos + MIN_PROB) # Ratio-based positive class weight (avoid div-by-zero)
-    cw = np.clip(cw, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT).astype(np.float32) # Clamp to keep gradients sane
-    class_weights = cw # Store NumPy version globally for loss
-    class_weights_tf = tf.constant(class_weights, dtype=tf.float32) # Store TF constant version for loss
+    # ---------- Step 7: Compute class weights (no globals) ---------- #
+    pos = Y_train.sum(axis=0)
+    neg = Y_train.shape[0] - pos
+    cw = neg / (pos + MIN_PROB)
+    cw = np.clip(cw, MIN_CLASS_WEIGHT, MAX_CLASS_WEIGHT).astype(np.float32)
 
+    # Create loss that closes over these weights
+    weighted_bce = make_weighted_bce(cw)
     # ---------- Step 8: Train quantum encoder + reset kernel cache ---------- #
     try:
         train_quantum_encoder(X_train, Y_train) # Fit/tune the quantum encoder using training data only
@@ -342,11 +338,13 @@ def deep_learning_prediction(pipeline: Any) -> None:
     input_dim = Xf_train.shape[1] # Store final fused feature width for model input validation
 
     # ---------- Step 10: Train-only data augmentation ---------- #
+    rng = np.random.default_rng(42) # testing seed for reproducibility
     Xa = [Xf_train] # List of training matrices to stack (original + noisy versions)
     Ya = [Y_train] # Labels duplicated for each augmented copy
-    for _ in range(DATA_AUGMENTATION_ROUNDS): # Generate multiple noisy copies of training data
-        Xa.append(Xf_train + np.random.normal(0.0, NOISE_STDDEV, Xf_train.shape)) # Add Gaussian noise in feature space
-        Ya.append(Y_train) # Keep labels unchanged (noise is only on features)
+    for _ in range(DATA_AUGMENTATION_ROUNDS):
+        noise = rng.normal(0.0, NOISE_STDDEV, Xf_train.shape)
+        Xa.append(Xf_train + noise)
+        Ya.append(Y_train)
     Xa = np.vstack(Xa).astype(float) # Stack augmented training matrices vertically
     Ya = np.vstack(Ya).astype(float) # Stack labels to match augmented rows
 
@@ -362,7 +360,6 @@ def deep_learning_prediction(pipeline: Any) -> None:
             keras.layers.Dropout(dropout_rate), # Regularisation (from Optuna or default)
             keras.layers.Dense(32, activation="relu"), # Third dense layer (32 units)
             keras.layers.Dense(NUM_TOTAL, activation="sigmoid"), # Output layer: independent probs per class (multi-label)
-
             ]
     )
 
@@ -393,39 +390,53 @@ def deep_learning_prediction(pipeline: Any) -> None:
                 verbose=1, # Prints when LR is reduced
             ),
             keras.callbacks.EarlyStopping(
-                monitor="val_loss", # Uses val_auc instead of val_loss
-                mode="min", # lower AUC is better
-                patience=12, # Epochs to wait before stopping
+                monitor="val_auc", # Uses val_auc instead of val_loss
+                mode="max", # lower AUC is better
+                patience=15, # Epochs to wait before stopping
                 min_delta=0.0005, # Minimum improvement required to reset patience
                 restore_best_weights=True, # Restores best weights by val_auc
                 verbose=1, # Print stop reason
             ),
-            keras.callbacks.EarlyStopping(
-                monitor="val_auc",
-                mode="max",
-                patience=20,
-                min_delta=0.001,
-                restore_best_weights=False,
-                verbose=0,
-                ),
-
             EpochLogger(), # Custom callback for epoch logging
         ],
         verbose=1, # Prints training progress per epoch
     )
     
-    # ===================== Post-training Pipe Importance (moved to ablation.py) ===================== #
+    # ===================== Post-training Pipe Importance ===================== #
     try:
-        pipe_importance = compute_post_training_pipe_importance(model, Xf_val, Y_val)
-        pipeline.add_data("pipe_importance", pipe_importance)
+        # Contract check: classical width must match what ablation expects
+        expected_classical_width = len(CLASSICAL_FEATURE_BLOCKS) * NUM_TOTAL
+        actual_classical_width = Xf_val.shape[1] - QUANTUM_FEATURE_LEN - KERNEL_PROTOTYPES
+        if actual_classical_width != expected_classical_width:
+            raise ValueError(
+                f"Classical feature width mismatch: expected {expected_classical_width}, "
+                f"got {actual_classical_width}. Ablation column ranges would be wrong."
+            )
 
-        weakest_pipe = get_most_impactful_pipe(pipe_importance)
+        result = compute_post_training_pipe_importance(
+            model=model,
+            Xf_val=Xf_val,
+            Y_val=Y_val,
+            Xf_train=Xf_train,   # needed for retrain ablation
+            Y_train=Y_train,
+            run_retrain_ablation=True,
+        )
+
+        # result is a dict: permutation scores, ablation scores, weak links
+        pipeline.add_data("pipe_importance", result.get("permutation", {}))
+        pipeline.add_data("pipe_importance_ablation", result.get("ablation", {}))
+
+        weakest_pipe = result.get("weak_link")
         if weakest_pipe:
             pipeline.add_data("weakest_pipe", weakest_pipe)
-            logging.info(f"Most impactful/weakest pipe identified: {weakest_pipe}")
+            logging.info(f"Weak link identified: {weakest_pipe}")
+        else:
+            logging.info("No actionable weak link (all scores ≈ 0 or no agreement).")
+
     except Exception as e:
         logging.error(f"Pipe importance analysis failed: {e}")
         pipeline.add_data("pipe_importance", {})
+        pipeline.add_data("pipe_importance_ablation", {})
 
     # ---------- Step 13: Inference ---------- #
     s = counts.sum() # Total counts after processing all historical draws

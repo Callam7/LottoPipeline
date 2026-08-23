@@ -4,6 +4,7 @@
 # Description:
 #   - Captures actual runtime data flowing through the pipeline
 #   - Produces compact per-key summaries for the decision layer
+#   - Keeps a one-run-back summary so real feature-level deltas can be reported
 #   - Works together with assessment.py (structural layer) and DataPipeline
 #   - Non-intrusive: only requires the observer hooks already added to DataPipeline
 #   - Designed to survive future code rewriting by the adaptor
@@ -23,6 +24,9 @@ class RuntimeObserver:
     Provides both the raw snapshot and compact per-key summaries so the
     decision layer (optuna_bridge) can work with useful information
     without receiving large arrays.
+
+    Also retains the previous run's compact summary in memory so that
+    real feature-level deltas can be calculated and reported.
     """
 
     def __init__(self, pipeline) -> None:
@@ -33,6 +37,9 @@ class RuntimeObserver:
         self.current_run_id: Optional[str] = None
         self.snapshots: Dict[str, Dict[str, Any]] = {}
         self.metrics: Dict[str, Dict[str, Any]] = {}
+
+        # One-run-back memory for feature deltas only
+        self._previous_summary: Optional[Dict[str, Any]] = None
 
         if hasattr(pipeline, "register_observer"):
             pipeline.register_observer(self)
@@ -135,9 +142,33 @@ class RuntimeObserver:
         summary["note"] = "complex object (not summarised)"
         return summary
 
+    def _compute_delta_from_summaries(
+        self, current: Dict[str, Any], previous: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Compute a simple numeric delta from two compact summaries.
+        Only works when both summaries contain numeric mean.
+        """
+        try:
+            if "mean" not in current or "mean" not in previous:
+                return {"comparable": False, "reason": "no numeric mean"}
+            curr_mean = float(current["mean"])
+            prev_mean = float(previous["mean"])
+            delta = curr_mean - prev_mean
+            return {
+                "comparable": True,
+                "identical": abs(delta) < 1e-12,
+                "delta_mean": delta,
+                "curr_mean": curr_mean,
+                "prev_mean": prev_mean,
+            }
+        except (TypeError, ValueError, KeyError):
+            return {"comparable": False, "reason": "non-numeric summary"}
+
     def get_run_summary(self, run_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        Return a compact, useful summary of the entire run.
+        Return a compact, useful summary of the entire run plus real
+        feature-level deltas against the immediately previous run (if any).
         This is the primary method the decision layer should call.
         """
         run_id = run_id or self.current_run_id
@@ -148,17 +179,42 @@ class RuntimeObserver:
                 "run_id": run_id,
                 "keys": [],
                 "summaries": {},
+                "deltas": {},
+                "previous_run_id": None,
             }
 
         summaries = {}
         for key, value in snapshot.items():
             summaries[key] = self._summarise_value(value)
 
-        return {
+        # Compute deltas against the previous summary
+        deltas = {}
+        previous_run_id = None
+        if self._previous_summary is not None:
+            previous_run_id = self._previous_summary.get("run_id")
+            prev_summaries = self._previous_summary.get("summaries", {})
+            for key, curr in summaries.items():
+                if key in prev_summaries:
+                    deltas[key] = self._compute_delta_from_summaries(
+                        curr, prev_summaries[key]
+                    )
+                else:
+                    deltas[key] = {
+                        "comparable": False,
+                        "reason": "key absent in previous run",
+                    }
+
+        result = {
             "run_id": run_id,
             "keys": list(snapshot.keys()),
             "summaries": summaries,
+            "deltas": deltas,
+            "previous_run_id": previous_run_id,
         }
+
+        # Keep only this summary for the next comparison
+        self._previous_summary = result
+        return result
 
     def record_final_metrics(self, metrics: Dict[str, Any]) -> None:
         """Store final training/evaluation metrics for the current run."""
