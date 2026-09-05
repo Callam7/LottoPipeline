@@ -24,20 +24,23 @@ Pipeline stages:
 import logging # Standard Python logging
 from typing import Any, Dict, List, Tuple # Type hints for clarity and static checking
 
-import numpy as np # Core numerical array library used throughout
-from adaptor.ablation import compute_post_training_pipe_importance, get_weak_link
+import numpy as np
+from adaptor.ablation import compute_post_training_pipe_importance
 import tensorflow as tf # TensorFlow backend used for training and tensor ops
 from tensorflow import keras # Keras API for model definition/training
 from config.logs import EpochLogger # Custom callback to log epoch progress cleanly
 from pipeline import get_dynamic_params # Dynamic training params (supports Optuna overrides)
+
 from config.quantum_features import ( # Imports quantum feature utilities/constants
     compute_quantum_matrix, # Builds quantum feature matrix from classical inputs
     train_quantum_encoder, # Trains/tunes the quantum encoder parameters
     QUANTUM_FEATURE_LEN, # Fixed width expected from compute_quantum_matrix output
 )
+
 from config import quantum_kernels as qk # Imports module itself (to access cache vars)
 from config.quantum_kernels import build_quantum_kernel_features # Builds kernel features
 
+from sklearn.metrics import roc_auc_score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s") # Set log format/level
 
@@ -259,13 +262,16 @@ def deep_learning_prediction(pipeline: Any) -> None:
     counts = np.zeros(NUM_TOTAL, dtype=float) # Running occurrence counts up to time t-1
     for t in range(n_draws): # Walk forward through history
         s = counts.sum() # Total counts so far
+
         F[t] = counts / s if s > 0 else np.ones(NUM_TOTAL) / NUM_TOTAL # Convert counts to frequencies or uniform
         for n in historical_data[t].get("numbers", []): # Adds numbers from the current draw into counts
             if isinstance(n, int) and 1 <= n <= NUM_MAIN: # Validate main number
                 counts[n - 1] += 1.0 # Increments main number count
+
         pb = historical_data[t].get("powerball") # Reads powerball for this draw
         if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL: # Single PB integer
             counts[NUM_MAIN + pb - 1] += 1.0 # Increments PB count
+        
         elif isinstance(pb, (list, tuple)): # Multiple PBs
             for p in pb: # Iterates PB list/tuple
                 if isinstance(p, int) and 1 <= p <= NUM_POWERBALL: # Validate PB
@@ -305,11 +311,13 @@ def deep_learning_prediction(pipeline: Any) -> None:
             QUANTUM_FEATURE_LEN, # Expected width from quantum feature extractor
             "Q_train" # Name used for error messages
         )
+
         Q_val = _force_width( # Ensure quantum feature matrix has fixed width
             compute_quantum_matrix(X_val), # Quantum feature extraction on validation matrix
             QUANTUM_FEATURE_LEN, # Expected width from quantum feature extractor
             "Q_val" # Name used for error messages
         )
+
     except Exception as e:
         logging.error(f"Quantum feature computation failed: {e}") # Report quantum feature failure
         Q_train = np.zeros((X_train.shape[0], QUANTUM_FEATURE_LEN)) # Fallback to zeros with correct shape
@@ -321,11 +329,13 @@ def deep_learning_prediction(pipeline: Any) -> None:
             num_prototypes=KERNEL_PROTOTYPES, # Requested number of prototypes / output width
             seed=1337 # Deterministic prototype selection/reproducibility
         )
+
         K_val_raw = build_quantum_kernel_features( # Compute kernel features for validation set
             X_val, # Validation examples mapped against same cached prototypes
             num_prototypes=KERNEL_PROTOTYPES, # Output width
             seed=1337 # Seed matches to ensure cache compatibility
         )
+
         K_train = _force_width(K_train_raw, KERNEL_PROTOTYPES, "K_train") # Enforce fixed width on training kernel feats
         K_val = _force_width(K_val_raw, KERNEL_PROTOTYPES, "K_val") # Enforce fixed width on validation kernel feats
     except Exception as e:
@@ -341,10 +351,12 @@ def deep_learning_prediction(pipeline: Any) -> None:
     rng = np.random.default_rng(42) # testing seed for reproducibility
     Xa = [Xf_train] # List of training matrices to stack (original + noisy versions)
     Ya = [Y_train] # Labels duplicated for each augmented copy
+
     for _ in range(DATA_AUGMENTATION_ROUNDS):
         noise = rng.normal(0.0, NOISE_STDDEV, Xf_train.shape)
         Xa.append(Xf_train + noise)
         Ya.append(Y_train)
+
     Xa = np.vstack(Xa).astype(float) # Stack augmented training matrices vertically
     Ya = np.vstack(Ya).astype(float) # Stack labels to match augmented rows
 
@@ -354,7 +366,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
             keras.layers.Input(shape=(input_dim,)), # Define input layer shape explicitly
             keras.layers.Dense(128, activation="relu"), # First dense layer (128 units)
             keras.layers.BatchNormalization(), # BatchNorm to stabilise hidden activations
-            keras.layers.Dropout(0.25), # Prevent memorising historical draws
+            keras.layers.Dropout(dropout_rate), # Prevent memorising historical draws
             keras.layers.Dense(64, activation="relu"), # Second dense layer (64 units)
             keras.layers.BatchNormalization(), # BatchNorm again
             keras.layers.Dropout(dropout_rate), # Regularisation (from Optuna or default)
@@ -391,7 +403,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
             ),
             keras.callbacks.EarlyStopping(
                 monitor="val_auc", # Uses val_auc instead of val_loss
-                mode="max", # lower AUC is better
+                mode="max", # higher AUC is better
                 patience=15, # Epochs to wait before stopping
                 min_delta=0.0005, # Minimum improvement required to reset patience
                 restore_best_weights=True, # Restores best weights by val_auc
@@ -401,42 +413,52 @@ def deep_learning_prediction(pipeline: Any) -> None:
         ],
         verbose=1, # Prints training progress per epoch
     )
-    
+
+    prod_pred = model.predict(Xf_val, verbose=0)
+    production_auc = float(roc_auc_score(Y_val, prod_pred, average="macro"))
+
     # ===================== Post-training Pipe Importance ===================== #
     try:
-        # Contract check: classical width must match what ablation expects
-        expected_classical_width = len(CLASSICAL_FEATURE_BLOCKS) * NUM_TOTAL
-        actual_classical_width = Xf_val.shape[1] - QUANTUM_FEATURE_LEN - KERNEL_PROTOTYPES
-        if actual_classical_width != expected_classical_width:
+        ranges = {}
+        col = 0
+        for name, _ in feature_blocks:
+            ranges[name] = (col, col + NUM_TOTAL)
+            col += NUM_TOTAL
+        ranges["quantum_features"] = (col, col + QUANTUM_FEATURE_LEN)
+        col += QUANTUM_FEATURE_LEN
+        ranges["quantum_kernels"] = (col, col + KERNEL_PROTOTYPES)
+        col += KERNEL_PROTOTYPES
+        if col != Xf_val.shape[1]:
             raise ValueError(
-                f"Classical feature width mismatch: expected {expected_classical_width}, "
-                f"got {actual_classical_width}. Ablation column ranges would be wrong."
+                f"Ablation range end {col} != Xf_val width {Xf_val.shape[1]}"
             )
 
         result = compute_post_training_pipe_importance(
             model=model,
             Xf_val=Xf_val,
             Y_val=Y_val,
-            Xf_train=Xf_train,   # needed for retrain ablation
+            Xf_train=Xf_train,
             Y_train=Y_train,
-            run_retrain_ablation=True,
+            pipe_feature_ranges=ranges,
+            production_auc=production_auc,
+            loss_fn=weighted_bce,
+            learning_rate=learning_rate,
+            dropout_rate=dropout_rate,
+            batch_size=batch_size,
         )
 
-        # result is a dict: permutation scores, ablation scores, weak links
-        pipeline.add_data("pipe_importance", result.get("permutation", {}))
-        pipeline.add_data("pipe_importance_ablation", result.get("ablation", {}))
+        pipeline.add_data("pipe_importance", result.get("ablation", {}))
+        weakest_pipe = result.get("candidate")
 
-        weakest_pipe = result.get("weak_link")
         if weakest_pipe:
             pipeline.add_data("weakest_pipe", weakest_pipe)
-            logging.info(f"Weak link identified: {weakest_pipe}")
+            logging.info(f"Candidate identified: {weakest_pipe}")
         else:
-            logging.info("No actionable weak link (all scores ≈ 0 or no agreement).")
+            logging.info("No actionable candidate (all ablation scores ≈ 0).")
 
     except Exception as e:
         logging.error(f"Pipe importance analysis failed: {e}")
         pipeline.add_data("pipe_importance", {})
-        pipeline.add_data("pipe_importance_ablation", {})
 
     # ---------- Step 13: Inference ---------- #
     s = counts.sum() # Total counts after processing all historical draws
@@ -447,6 +469,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
     feature_blocks_now = _get_classical_feature_arrays( # Get blocks in canonical order for inference
         mc, rd, mk, en, fn, centroids_arr, clusters_arr
     )
+
     x_now = _build_feature_matrix(f_now, feature_blocks_now) # Build current classical feature row using same helper
 
     try:
@@ -468,6 +491,8 @@ def deep_learning_prediction(pipeline: Any) -> None:
     except Exception:
         k_now = np.zeros((1, KERNEL_PROTOTYPES)) # Fallback to zeros if kernel step fails
 
+    pipeline.add_data("quantum_features", np.asarray(q_now, dtype=float).ravel())
+    pipeline.add_data("quantum_kernels", np.asarray(k_now, dtype=float).ravel())
     xf_now = np.column_stack((x_now, q_now, k_now)).astype(float) # Fuse classical + quantum + kernel for inference
 
     if xf_now.shape[1] != input_dim: # Hard check: inference feature width must match model input width

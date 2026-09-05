@@ -2,43 +2,27 @@
 # Project: Lotto Generator
 # Purpose: Runtime Observation Layer for Self-Adaptive Pipeline
 # Description:
-#   - Captures actual runtime data flowing through the pipeline
-#   - Produces compact per-key summaries for the decision layer
-#   - Keeps a one-run-back summary so real feature-level deltas can be reported
-#   - Works together with assessment.py (structural layer) and DataPipeline
-#   - Non-intrusive: only requires the observer hooks already added to DataPipeline
-#   - Designed to survive future code rewriting by the adaptor
+#   - Captures runtime pipeline.add_data values
+#   - Compact per-key summaries for optuna_bridge
+#   - Previous-run snapshot taken in start_new_run (not in get_run_summary)
+#   - Deltas use entropy, then std — never mean of a simplex
 
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+IDENTICAL_TOL = 1e-12
 
 
 class RuntimeObserver:
-    """
-    Observes and records all data that passes through the DataPipeline at runtime.
-
-    Provides both the raw snapshot and compact per-key summaries so the
-    decision layer (optuna_bridge) can work with useful information
-    without receiving large arrays.
-
-    Also retains the previous run's compact summary in memory so that
-    real feature-level deltas can be calculated and reported.
-    """
-
     def __init__(self, pipeline) -> None:
-        """
-        Initialise the observer and register it with the DataPipeline.
-        """
         self.pipeline = pipeline
         self.current_run_id: Optional[str] = None
         self.snapshots: Dict[str, Dict[str, Any]] = {}
         self.metrics: Dict[str, Dict[str, Any]] = {}
-
-        # One-run-back memory for feature deltas only
         self._previous_summary: Optional[Dict[str, Any]] = None
 
         if hasattr(pipeline, "register_observer"):
@@ -50,15 +34,29 @@ class RuntimeObserver:
                 "Observer will not receive automatic notifications."
             )
 
+    def _freeze_current_as_previous(self) -> None:
+        """Store compact stats for the run that is about to be replaced."""
+        if self.current_run_id is None:
+            return
+        snapshot = self.snapshots.get(self.current_run_id) or {}
+        if not snapshot:
+            return
+        summaries = {k: self._summarise_value(v) for k, v in snapshot.items()}
+        self._previous_summary = {
+            "run_id": self.current_run_id,
+            "keys": list(snapshot.keys()),
+            "summaries": summaries,
+        }
+
     def start_new_run(self, run_id: Optional[str] = None) -> str:
-        """Start a new observation session for the current pipeline run."""
+        """Freeze the last run, then open a new snapshot."""
+        self._freeze_current_as_previous()
         self.current_run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.snapshots[self.current_run_id] = {}
         logging.info(f"Started new runtime observation run: {self.current_run_id}")
         return self.current_run_id
 
     def record_add_data(self, key: str, value: Any) -> None:
-        """Called by DataPipeline when add_data() is executed."""
         if self.current_run_id is None:
             logging.debug("No active run. Ignoring record_add_data call.")
             return
@@ -66,11 +64,9 @@ class RuntimeObserver:
         logging.debug(f"Recorded add_data: key='{key}' for run {self.current_run_id}")
 
     def record_get_data(self, key: str, value: Any) -> None:
-        """Optional. Currently unused."""
         pass
 
     def get_snapshot(self, run_id: Optional[str] = None) -> Dict[str, Any]:
-        """Return the full raw snapshot for a run."""
         run_id = run_id or self.current_run_id
         if run_id is None:
             logging.warning("No run_id provided and no current run is active.")
@@ -78,67 +74,56 @@ class RuntimeObserver:
         return self.snapshots.get(run_id, {})
 
     def get_value(self, key: str, run_id: Optional[str] = None) -> Any:
-        """Return a single value from a run snapshot."""
-        snapshot = self.get_snapshot(run_id)
-        return snapshot.get(key)
+        return self.get_snapshot(run_id).get(key)
 
     def _summarise_value(self, value: Any) -> Dict[str, Any]:
-        """
-        Produce a compact summary of a single recorded value.
-        Avoids storing or returning large arrays.
-        """
-        summary: Dict[str, Any] = {
-            "type": type(value).__name__,
-        }
+        summary: Dict[str, Any] = {"type": type(value).__name__}
 
         if value is None:
             summary["note"] = "None"
             return summary
 
-        # NumPy arrays and array-like
         if isinstance(value, np.ndarray):
             summary["shape"] = value.shape
             summary["dtype"] = str(value.dtype)
-
             if value.size > 0 and np.issubdtype(value.dtype, np.number):
                 flat = value.astype(float).ravel()
                 summary["min"] = float(np.min(flat))
                 summary["max"] = float(np.max(flat))
                 summary["mean"] = float(np.mean(flat))
                 summary["std"] = float(np.std(flat))
-
-                # Simple probability-vector heuristic
-                if flat.ndim == 1 and flat.size > 1:
+                if flat.size > 1:
                     total = float(np.sum(flat))
-                    if 0.98 <= total <= 1.02:
+                    if flat.min() >= -1e-12 and 0.98 <= total <= 1.02:
                         summary["looks_like_probability"] = True
-                        # Shannon entropy (natural log)
-                        p = flat[flat > 0]
-                        if p.size > 0:
-                            summary["entropy"] = float(-np.sum(p * np.log(p)))
+                        p = np.clip(flat, 0.0, None)
+                        s = float(p.sum())
+                        if s > 0:
+                            p = p / s
+                            p_nz = p[p > 0]
+                            summary["entropy"] = float(-np.sum(p_nz * np.log(p_nz)))
+                            uniform = 1.0 / flat.size
+                            summary["l1_vs_uniform"] = float(np.sum(np.abs(p - uniform)))
                     else:
                         summary["looks_like_probability"] = False
-
             return summary
 
-        # Python lists / tuples of numbers
         if isinstance(value, (list, tuple)) and len(value) > 0:
             try:
-                arr = np.asarray(value, dtype=float)
+                arr = np.asarray(value, dtype=float).ravel()
                 summary["length"] = len(value)
                 summary["min"] = float(np.min(arr))
                 summary["max"] = float(np.max(arr))
                 summary["mean"] = float(np.mean(arr))
+                summary["std"] = float(np.std(arr))
             except (ValueError, TypeError):
                 summary["length"] = len(value)
             return summary
 
-        # Simple scalars
         if isinstance(value, (int, float, bool, str)):
             summary["value"] = value
             return summary
 
-        # Fallback
         summary["note"] = "complex object (not summarised)"
         return summary
 
@@ -146,31 +131,61 @@ class RuntimeObserver:
         self, current: Dict[str, Any], previous: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Compute a simple numeric delta from two compact summaries.
-        Only works when both summaries contain numeric mean.
+        Comparable delta order:
+          1) entropy (probability vectors)
+          2) std
+          3) mean only if NOT a probability vector
         """
         try:
-            if "mean" not in current or "mean" not in previous:
-                return {"comparable": False, "reason": "no numeric mean"}
-            curr_mean = float(current["mean"])
-            prev_mean = float(previous["mean"])
-            delta = curr_mean - prev_mean
-            return {
-                "comparable": True,
-                "identical": abs(delta) < 1e-12,
-                "delta_mean": delta,
-                "curr_mean": curr_mean,
-                "prev_mean": prev_mean,
-            }
+            curr_prob = bool(current.get("looks_like_probability"))
+            prev_prob = bool(previous.get("looks_like_probability"))
+
+            if "entropy" in current and "entropy" in previous:
+                de = float(current["entropy"]) - float(previous["entropy"])
+                identical = abs(de) < IDENTICAL_TOL
+                if "std" in current and "std" in previous:
+                    identical = identical and abs(
+                        float(current["std"]) - float(previous["std"])
+                    ) < IDENTICAL_TOL
+                return {
+                    "comparable": True,
+                    "identical": identical,
+                    "delta_entropy": de,
+                    "curr_entropy": float(current["entropy"]),
+                    "prev_entropy": float(previous["entropy"]),
+                }
+
+            if "std" in current and "std" in previous:
+                ds = float(current["std"]) - float(previous["std"])
+                return {
+                    "comparable": True,
+                    "identical": abs(ds) < IDENTICAL_TOL,
+                    "delta_std": ds,
+                    "curr_std": float(current["std"]),
+                    "prev_std": float(previous["std"]),
+                }
+
+            if (
+                "mean" in current
+                and "mean" in previous
+                and not curr_prob
+                and not prev_prob
+            ):
+                dm = float(current["mean"]) - float(previous["mean"])
+                return {
+                    "comparable": True,
+                    "identical": abs(dm) < IDENTICAL_TOL,
+                    "delta_mean": dm,
+                    "curr_mean": float(current["mean"]),
+                    "prev_mean": float(previous["mean"]),
+                }
+
+            return {"comparable": False, "reason": "no shared comparable statistic"}
         except (TypeError, ValueError, KeyError):
             return {"comparable": False, "reason": "non-numeric summary"}
 
     def get_run_summary(self, run_id: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Return a compact, useful summary of the entire run plus real
-        feature-level deltas against the immediately previous run (if any).
-        This is the primary method the decision layer should call.
-        """
+        """Pure read. Does not update previous-run memory."""
         run_id = run_id or self.current_run_id
         snapshot = self.get_snapshot(run_id)
 
@@ -180,15 +195,16 @@ class RuntimeObserver:
                 "keys": [],
                 "summaries": {},
                 "deltas": {},
-                "previous_run_id": None,
+                "previous_run_id": (
+                    self._previous_summary.get("run_id")
+                    if self._previous_summary
+                    else None
+                ),
             }
 
-        summaries = {}
-        for key, value in snapshot.items():
-            summaries[key] = self._summarise_value(value)
+        summaries = {key: self._summarise_value(value) for key, value in snapshot.items()}
 
-        # Compute deltas against the previous summary
-        deltas = {}
+        deltas: Dict[str, Any] = {}
         previous_run_id = None
         if self._previous_summary is not None:
             previous_run_id = self._previous_summary.get("run_id")
@@ -204,7 +220,7 @@ class RuntimeObserver:
                         "reason": "key absent in previous run",
                     }
 
-        result = {
+        return {
             "run_id": run_id,
             "keys": list(snapshot.keys()),
             "summaries": summaries,
@@ -212,12 +228,7 @@ class RuntimeObserver:
             "previous_run_id": previous_run_id,
         }
 
-        # Keep only this summary for the next comparison
-        self._previous_summary = result
-        return result
-
     def record_final_metrics(self, metrics: Dict[str, Any]) -> None:
-        """Store final training/evaluation metrics for the current run."""
         if self.current_run_id is None:
             logging.warning("Cannot record metrics - no active run.")
             return
@@ -225,16 +236,10 @@ class RuntimeObserver:
         logging.info(f"Recorded final metrics for run {self.current_run_id}")
 
     def get_latest_metrics(self) -> Optional[Dict[str, Any]]:
-        """Return the metrics from the most recent completed run."""
         if not self.metrics:
             return None
         latest_run = max(self.metrics.keys())
         return self.metrics[latest_run]
 
     def enable_ablation_mode(self, neutralized_keys: List[str]) -> None:
-        """
-        Placeholder for future runtime ablation support.
-        Not used by the current post-training grouped permutation method.
-        """
         logging.info(f"Ablation mode requested for keys: {neutralized_keys}")
-        # Future implementation reserved

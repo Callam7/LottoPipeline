@@ -1,11 +1,14 @@
 ﻿# Modified By: Callam
 # Project: Lotto Generator
-# Purpose: Optuna Bridge - Stage 1 (Clean Architecture)
+# Purpose: Optuna Bridge - Stage 1 (report-only decision context)
 # Description:
-# - Consumes the weak link already identified by ablation
-#   - Pulls structural information from assessment.py via get_pipe_summary()
-#   - Pulls runtime context from the observer via get_snapshot()
-
+#   - Compares latest training batch to recent history (peak val AUC)
+#   - If improved: skip (no adaptor action)
+#   - If not improved: emit a decision record
+#       * real weak link → methodology_review on that pipe
+#       * no weak link   → stack_review
+#   - Pulls structure from assessment and runtime from the observer
+#   - Does not rewrite code. Does not search hyperparameters.
 
 import logging
 import sqlite3
@@ -17,13 +20,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 DB_PATH = "lotto.db"
 PIPE_IMPORTANCE_KEY = "pipe_importance"
 WEAKEST_PIPE_KEY = "weakest_pipe"
-PIPE_IMPORTANCE_ABLATION_KEY = "pipe_importance_ablation"
-MIN_IMPROVEMENT = 0.002
+MIN_IMPROVEMENT = 0.005
 
-# Minimal, documented mapping from the feature-block names used by ablation
-# to the actual source filenames. This is the only place names are translated.
-# It exists solely because the classical feature blocks and the .py files
-# do not share identical names.
 PIPE_TO_FILENAME = {
     "bayesian_fusion_norm": "bayesian_fusion.py",
     "monte_carlo": "monte_carlo.py",
@@ -38,7 +36,7 @@ PIPE_TO_FILENAME = {
 
 
 def get_last_six_runs() -> list:
-    """Return the last 6 full training batches summarised by run_date."""
+    """Return the last 6 date-grouped training batches (peak + avg)."""
     query = """
         WITH BatchStats AS (
             SELECT
@@ -69,30 +67,49 @@ def get_last_six_runs() -> list:
 
 def compare_latest_to_previous(runs: list) -> tuple[bool, float]:
     """
-    Returns (should_skip, numeric_delta).
-    should_skip = True  → latest run improved → take no action
-    numeric_delta       → latest − median of previous (positive = improvement)
+    Skip-gate uses peak val AUC (index 3), not epoch average (index 2).
+    should_skip = True → latest peak beat the recent median by MIN_IMPROVEMENT.
     """
     if len(runs) < 2:
         return True, 0.0
 
-    latest = runs[0][2]
-    if latest is None:
+    latest_peak = runs[0][3]
+    if latest_peak is None:
         return False, 0.0
 
-    previous = [r[2] for r in runs[1:] if r[2] is not None]
-    if not previous:
+    previous_peaks = [r[3] for r in runs[1:] if r[3] is not None]
+    if not previous_peaks:
         return True, 0.0
 
-    median_prev = statistics.median(previous)
-    delta = latest - median_prev
+    median_prev = statistics.median(previous_peaks)
+    delta = latest_peak - median_prev
 
     if delta > MIN_IMPROVEMENT:
-        logging.info(f"Latest batch IMPROVED (delta = {delta:+.4f})")
+        logging.info(f"Latest batch IMPROVED (peak delta = {delta:+.4f})")
         return True, delta
 
-    logging.info(f"Latest batch did NOT improve (delta = {delta:+.4f})")
+    logging.info(f"Latest batch did NOT improve (peak delta = {delta:+.4f})")
     return False, delta
+
+
+def _resolve_runtime_key(
+    weakest_pipe: Optional[str],
+    runtime_summary: Dict[str, Any],
+    structural: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Bind the logged tensor to the weak-link *name*.
+    Never use structural['outputs'][0] — that is a sibling key
+    (centroids would log clusters).
+    """
+    if not weakest_pipe:
+        return None
+    if weakest_pipe in runtime_summary:
+        return weakest_pipe
+    outputs = (structural or {}).get("outputs") or []
+    if weakest_pipe in outputs:
+        return weakest_pipe
+    return None
 
 
 def build_decision_context(
@@ -100,44 +117,43 @@ def build_decision_context(
     assessor: Any = None,
     observer: Any = None,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Builds a clean decision context from ablation + assessment + observer.
-    This is the single source of truth that later adaptor stages will consume.
-    """
     if pipeline is None:
         logging.error("Pipeline object not provided.")
         return None
 
-    # 1. Read what permutation + retrain ablation already decided
     importance = pipeline.get_data(PIPE_IMPORTANCE_KEY) or {}
-    importance_ablation = pipeline.get_data(PIPE_IMPORTANCE_ABLATION_KEY) or {}
     weakest_pipe = pipeline.get_data(WEAKEST_PIPE_KEY)
 
-    # weakest_pipe is set by deep_learning from get_weak_link / combined signal.
-    # If missing, there is nothing actionable for Stage 1.
-    if not weakest_pipe:
-        logging.info("No actionable weak link identified.")
-        return None
+    if weakest_pipe:
+        action = "methodology_review"
+        reason = (
+            f"Stage 1 report only. Weak link '{weakest_pipe}' "
+            "is the candidate for later search/replacement."
+        )
+    else:
+        action = "stack_review"
+        reason = (
+            "Stage 1 report only. No clear pipe weak link "
+            "(all ablation scores ≈ 0). Review the stack as a whole."
+        )
+        logging.info("No actionable weak link identified — stack_review.")
 
     context: Dict[str, Any] = {
         "weakest_pipe": weakest_pipe,
         "importance": importance or {},
-        "importance_ablation": importance_ablation or {},
         "structural": None,
         "runtime_keys": None,
-        "action": "methodology_review",
-        "reason": "No tunable parameters discovered for this pipe.",
+        "action": action,
+        "reason": reason,
     }
 
-    # 2. Structural information from assessment
-    if assessor is not None:
+    if assessor is not None and weakest_pipe:
         try:
             summary = assessor.get_pipe_summary()
             filename = PIPE_TO_FILENAME.get(weakest_pipe)
             if filename and filename in summary:
                 context["structural"] = summary[filename]
             else:
-                # Fallback: try a direct name match
                 for fname, data in summary.items():
                     if weakest_pipe.replace("_", "") in fname.replace("_", ""):
                         context["structural"] = data
@@ -145,7 +161,6 @@ def build_decision_context(
         except Exception as e:
             logging.warning(f"Could not retrieve structural info: {e}")
 
-    # 3. Runtime context from observer (richer summary)
     if observer is not None:
         try:
             run_summary = observer.get_run_summary()
@@ -155,16 +170,22 @@ def build_decision_context(
                 context["runtime_deltas"] = run_summary.get("deltas", {})
         except Exception as e:
             logging.warning(f"Could not retrieve runtime summary: {e}")
+
     return context
+
 
 def run_optuna_bridge(
     pipeline: Any = None,
     assessor: Any = None,
     observer: Any = None,
 ) -> None:
-    """
-    Main entry point. Called after a full pipeline run.
-    """
+    # Finalize observer on every run, including skipped decisions.
+    if observer is not None:
+        try:
+            observer.get_run_summary()
+        except Exception as e:
+            logging.warning(f"Observer finalize failed: {e}")
+
     runs = get_last_six_runs()
     if not runs:
         return
@@ -179,18 +200,16 @@ def run_optuna_bridge(
     if context is None:
         return
 
-    # Clean Stage-1 report
     logging.info("=== Stage 1 Decision Context ===")
     logging.info(f"Weak link          : {context['weakest_pipe']}")
 
-    if context.get("importance"):
+    if context.get("weakest_pipe") and context.get("importance"):
         val = context["importance"].get(context["weakest_pipe"])
-        if val is not None:
-            logging.info(f"Perm score         : {val:+.6f}")
-
-    if context.get("importance_ablation"):
-        val = context["importance_ablation"].get(context["weakest_pipe"])
-        if val is not None:
+        if val is None:
+            pass
+        elif abs(val) < 1e-12:
+            logging.info("Ablation score     : 0.0000")
+        else:
             logging.info(f"Ablation score     : {val:+.6f}")
 
     structural = context.get("structural")
@@ -202,31 +221,41 @@ def run_optuna_bridge(
         if structural.get("data_movement"):
             logging.info(f"Data movement      : {structural['data_movement']}")
 
-    # Focused runtime summary for the weak pipe only
     runtime_summary = context.get("runtime_summary") or {}
-    weak_output_key = None
-    if structural and structural.get("outputs"):
-        weak_output_key = structural["outputs"][0]
+    weak_output_key = _resolve_runtime_key(
+        context.get("weakest_pipe"),
+        runtime_summary,
+        structural,
+    )
 
     if weak_output_key and weak_output_key in runtime_summary:
         logging.info(f"Runtime summary for '{weak_output_key}':")
         for k, v in runtime_summary[weak_output_key].items():
             logging.info(f"    {k}: {v}")
     else:
-        logging.info("Runtime summary    : not available for weak pipe output")
-    
+        logging.info("Runtime summary: not available for this block")
+
     runtime_deltas = context.get("runtime_deltas") or {}
     if weak_output_key and weak_output_key in runtime_deltas:
         d = runtime_deltas[weak_output_key]
         if d.get("comparable"):
-            logging.info(f"Feature delta      : {d.get('delta_mean', 0.0):+.6f}")
+            if "delta_entropy" in d:
+                logging.info(f"Feature delta: entropy {d['delta_entropy']:+.6f}")
+            elif "delta_std" in d:
+                logging.info(f"Feature delta: std {d['delta_std']:+.6f}")
+            elif "delta_mean" in d:
+                logging.info(f"Feature delta: mean {d['delta_mean']:+.6f}")
+            else:
+                logging.info("Feature delta: comparable (no numeric field)")
         else:
-            logging.info(f"Feature delta      : not comparable ({d.get('reason', 'unknown')})")
-    logging.info(f"Recommended action : {context['action']}")
-    logging.info(f"Reason             : {context['reason']}")
+            logging.info(
+                f"Feature delta: not comparable ({d.get('reason', 'unknown')})"
+            )
+
+    logging.info(f"Recommended action: {context['action']}")
+    logging.info(f"Reason: {context['reason']}")
     logging.info("================================")
 
-    # Store the decision so later adaptor stages can read it
     if pipeline is not None:
         pipeline.add_data("adaptor_decision", context)
 

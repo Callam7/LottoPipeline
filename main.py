@@ -8,7 +8,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import numpy as np
 from datetime import datetime
 
 # Database functions
