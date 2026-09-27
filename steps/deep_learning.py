@@ -25,7 +25,7 @@ import logging # Standard Python logging
 from typing import Any, Dict, List, Tuple # Type hints for clarity and static checking
 
 import numpy as np
-from adaptor.ablation import compute_post_training_pipe_importance
+from adaptor.ablation import compute_importance, _safe_macro_auc
 import tensorflow as tf # TensorFlow backend used for training and tensor ops
 from tensorflow import keras # Keras API for model definition/training
 from config.logs import EpochLogger # Custom callback to log epoch progress cleanly
@@ -46,8 +46,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # ===================== Constants ===================== #
 NUM_MAIN = 40 # Main number count (1..40)
-NUM_POWERBALL = 10 # Powerball number count (1..10)
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL # Total output width (50)
+NUM_POWERBALL = 14 # Powerball number count (1..14)
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL # Total output width (54)
 
 EPOCH_SIZE = 60 # Default number of training epochs (upper bound, can be overridden by Optuna)
 BATCH_SIZE = 32 # Default mini-batch size
@@ -415,7 +415,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
     )
 
     prod_pred = model.predict(Xf_val, verbose=0)
-    production_auc = float(roc_auc_score(Y_val, prod_pred, average="macro"))
+    production_auc = _safe_macro_auc(Y_val, prod_pred)
 
     # ===================== Post-training Pipe Importance ===================== #
     try:
@@ -433,7 +433,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
                 f"Ablation range end {col} != Xf_val width {Xf_val.shape[1]}"
             )
 
-        result = compute_post_training_pipe_importance(
+        result = compute_importance(
             model=model,
             Xf_val=Xf_val,
             Y_val=Y_val,
@@ -448,17 +448,25 @@ def deep_learning_prediction(pipeline: Any) -> None:
         )
 
         pipeline.add_data("pipe_importance", result.get("ablation", {}))
-        weakest_pipe = result.get("candidate")
-
-        if weakest_pipe:
-            pipeline.add_data("weakest_pipe", weakest_pipe)
-            logging.info(f"Candidate identified: {weakest_pipe}")
+        pipeline.add_data("candidate", result.get("candidate"))
+        pipeline.add_data("candidate_class", result.get("candidate_class"))
+        pipeline.add_data("candidate_pipe", result.get("candidate_pipe"))
+        pipeline.add_data("candidate_encoder", result.get("candidate_encoder"))
+        pipeline.add_data("weakest_pipe", result.get("candidate_pipe"))
+        if result.get("candidate"):
+            logging.info(
+                f"Candidate ({result.get('candidate_class')}): {result.get('candidate')}"
+            )
         else:
             logging.info("No actionable candidate (all ablation scores ≈ 0).")
-
     except Exception as e:
         logging.error(f"Pipe importance analysis failed: {e}")
         pipeline.add_data("pipe_importance", {})
+        pipeline.add_data("candidate", None)
+        pipeline.add_data("candidate_class", None)
+        pipeline.add_data("candidate_pipe", None)
+        pipeline.add_data("candidate_encoder", None)
+        pipeline.add_data("weakest_pipe", None)
 
     # ---------- Step 13: Inference ---------- #
     s = counts.sum() # Total counts after processing all historical draws

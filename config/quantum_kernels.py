@@ -24,6 +24,10 @@ import pennylane as qml                # Quantum circuit framework
 # because its global weights are reassigned during training.
 from config import quantum_features as qf
 
+COMPONENT_CLASS = "encoder"          # Not a 54-wide pipe
+KERNEL_PROTOTYPES = 24               # Frozen fusion width — must match DL / ablation
+KERNEL_SEED = 1337                   # Default prototype seed
+
 
 # ---------------------------------------------------------------------
 # Quantum device configuration
@@ -254,8 +258,8 @@ def _compute_fidelity_feature_matrix(
 
 def build_quantum_kernel_features(
     feature_matrix: np.ndarray,
-    num_prototypes: int = 24,
-    seed: int = 1337,
+    num_prototypes: int = KERNEL_PROTOTYPES,
+    seed: int = KERNEL_SEED,
     weights: np.ndarray | None = None,
     use_cache: bool = True,
 ) -> np.ndarray:
@@ -332,5 +336,52 @@ def build_quantum_kernel_features(
         K_scaled = out
 
     return K_scaled.astype(float)
+
+def get_encoder_spec() -> dict:
+    """
+    What the adaptor is allowed to touch. Column count stays KERNEL_PROTOTYPES.
+    """
+    return {
+        "class": "encoder",
+        "module": "quantum_kernels",
+        "output_key": "quantum_kernels",
+        "output_width": int(KERNEL_PROTOTYPES),
+        "num_qubits": int(qf.NUM_QUBITS),
+        "weight_shape": tuple(qf._Q_WEIGHT_SHAPE),
+        "num_prototypes": int(KERNEL_PROTOTYPES),
+        "seed": int(KERNEL_SEED),
+        "device": "default.qubit",
+        "tunable": ("seed",),
+        "frozen": ("output_width", "num_prototypes", "num_qubits", "weight_shape"),
+    }
+
+
+def snapshot_encoder() -> dict:
+    """
+    Seed + cache metadata so a bad prototype draw can be undone.
+    Weights live in quantum_features — snapshot those there.
+    """
+    return {
+        "seed": int(KERNEL_SEED),
+        "num_prototypes": int(KERNEL_PROTOTYPES),
+        "cache_seed": _cached_seed,
+        "cache_num_prototypes": _cached_num_prototypes,
+    }
+
+
+def apply_encoder_spec(spec: dict) -> None:
+    """
+    Apply seed only. Never change KERNEL_PROTOTYPES (DL column count).
+    Drop prototype cache so the next build uses the new seed.
+    """
+    global KERNEL_SEED
+    global _cached_proto_states, _cached_num_prototypes, _cached_seed
+
+    if "seed" in spec:
+        KERNEL_SEED = int(spec["seed"])
+
+    _cached_proto_states = None
+    _cached_num_prototypes = None
+    _cached_seed = None
 
 

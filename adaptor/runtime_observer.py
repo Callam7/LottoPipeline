@@ -7,26 +7,29 @@
 #   - Previous-run snapshot taken in start_new_run (not in get_run_summary)
 #   - Deltas use entropy, then std — never mean of a simplex
 
-import logging
-from typing import Any, Dict, List, Optional
-from datetime import datetime
-import numpy as np
+import logging                         # Status / miss-run warnings
+from typing import Any, Dict, List, Optional  # Type hints
+from datetime import datetime          # Default run_id stamp
+import numpy as np                     # Array stats for summaries
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(                   # Same stamp format as the rest of the adaptor
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 
-IDENTICAL_TOL = 1e-12
+IDENTICAL_TOL = 1e-12                  # Below this, two stats count as the same
 
 
 class RuntimeObserver:
     def __init__(self, pipeline) -> None:
-        self.pipeline = pipeline
-        self.current_run_id: Optional[str] = None
-        self.snapshots: Dict[str, Dict[str, Any]] = {}
-        self.metrics: Dict[str, Dict[str, Any]] = {}
-        self._previous_summary: Optional[Dict[str, Any]] = None
+        self.pipeline = pipeline       # Pipeline this observer is hooked to
+        self.current_run_id: Optional[str] = None  # Active snapshot id
+        self.snapshots: Dict[str, Dict[str, Any]] = {}  # run_id -> {key: raw value}
+        self.metrics: Dict[str, Dict[str, Any]] = {}    # Optional end-of-run metrics
+        self._previous_summary: Optional[Dict[str, Any]] = None  # Compact stats from last run
 
         if hasattr(pipeline, "register_observer"):
-            pipeline.register_observer(self)
+            pipeline.register_observer(self)  # Pipeline will call record_add_data
             logging.info("RuntimeObserver successfully registered with DataPipeline.")
         else:
             logging.warning(
@@ -37,22 +40,22 @@ class RuntimeObserver:
     def _freeze_current_as_previous(self) -> None:
         """Store compact stats for the run that is about to be replaced."""
         if self.current_run_id is None:
-            return
+            return                     # Nothing to freeze
         snapshot = self.snapshots.get(self.current_run_id) or {}
         if not snapshot:
-            return
+            return                     # Empty snapshot — skip
         summaries = {k: self._summarise_value(v) for k, v in snapshot.items()}
         self._previous_summary = {
             "run_id": self.current_run_id,
             "keys": list(snapshot.keys()),
-            "summaries": summaries,
+            "summaries": summaries,    # Stats only — not the raw arrays
         }
 
     def start_new_run(self, run_id: Optional[str] = None) -> str:
         """Freeze the last run, then open a new snapshot."""
         self._freeze_current_as_previous()
         self.current_run_id = run_id or datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        self.snapshots[self.current_run_id] = {}
+        self.snapshots[self.current_run_id] = {}  # Fresh key map
         logging.info(f"Started new runtime observation run: {self.current_run_id}")
         return self.current_run_id
 
@@ -60,11 +63,11 @@ class RuntimeObserver:
         if self.current_run_id is None:
             logging.debug("No active run. Ignoring record_add_data call.")
             return
-        self.snapshots[self.current_run_id][key] = value
+        self.snapshots[self.current_run_id][key] = value  # Last write wins for that key
         logging.debug(f"Recorded add_data: key='{key}' for run {self.current_run_id}")
 
     def record_get_data(self, key: str, value: Any) -> None:
-        pass
+        pass                           # Reads are not stored
 
     def get_snapshot(self, run_id: Optional[str] = None) -> Dict[str, Any]:
         run_id = run_id or self.current_run_id
@@ -74,7 +77,7 @@ class RuntimeObserver:
         return self.snapshots.get(run_id, {})
 
     def get_value(self, key: str, run_id: Optional[str] = None) -> Any:
-        return self.get_snapshot(run_id).get(key)
+        return self.get_snapshot(run_id).get(key)  # One raw value or None
 
     def _summarise_value(self, value: Any) -> Dict[str, Any]:
         summary: Dict[str, Any] = {"type": type(value).__name__}
@@ -95,7 +98,7 @@ class RuntimeObserver:
                 if flat.size > 1:
                     total = float(np.sum(flat))
                     if flat.min() >= -1e-12 and 0.98 <= total <= 1.02:
-                        summary["looks_like_probability"] = True
+                        summary["looks_like_probability"] = True  # Non-neg and sums ~ 1
                         p = np.clip(flat, 0.0, None)
                         s = float(p.sum())
                         if s > 0:
@@ -117,7 +120,7 @@ class RuntimeObserver:
                 summary["mean"] = float(np.mean(arr))
                 summary["std"] = float(np.std(arr))
             except (ValueError, TypeError):
-                summary["length"] = len(value)
+                summary["length"] = len(value)  # Mixed types — length only
             return summary
 
         if isinstance(value, (int, float, bool, str)):
@@ -238,8 +241,9 @@ class RuntimeObserver:
     def get_latest_metrics(self) -> Optional[Dict[str, Any]]:
         if not self.metrics:
             return None
-        latest_run = max(self.metrics.keys())
+        latest_run = max(self.metrics.keys())  # Lexical max of timestamp ids
         return self.metrics[latest_run]
 
     def enable_ablation_mode(self, neutralized_keys: List[str]) -> None:
         logging.info(f"Ablation mode requested for keys: {neutralized_keys}")
+        # Log only. Ablation does not use this hook.

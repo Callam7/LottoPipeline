@@ -9,8 +9,8 @@ from sklearn.preprocessing import MinMaxScaler  # Feature scaling utility
 import logging                         # Logging system for status/errors
 
 NUM_MAIN = 40                          # Number of main lotto numbers
-NUM_POWERBALL = 10                     # Number of Powerball numbers
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL   # Total length of probability vector (50)
+NUM_POWERBALL = 14                     # Number of Powerball numbers
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL   # Total length of probability vector (54)
 
 # Configure logging output format and level
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,7 +46,7 @@ def kmeans_clustering_and_correlation(pipeline, n_clusters_main=5, n_clusters_po
 
     try:
         # Perform K-Means clustering on scaled probabilities
-        kmeans_main = KMeans(n_clusters=int(n_clusters_main), random_state=42, n_init=10)
+        kmeans_main = KMeans(n_clusters=int(n_clusters_main), random_state=42, n_init=NUM_POWERBALL)
         labels_main = kmeans_main.fit_predict(data_main).astype(int)          # Cluster ID for each number (40,)
         centers_main = np.asarray(kmeans_main.cluster_centers_, dtype=float)  # Cluster center values (K_main,1)
 
@@ -91,7 +91,7 @@ def kmeans_clustering_and_correlation(pipeline, n_clusters_main=5, n_clusters_po
     # Offset PB cluster labels so they don't overlap with main cluster indices
     labels_power_offset = labels_power + int(centers_main.shape[0])
 
-    # Combined cluster labels for all 50 numbers
+    # Combined cluster labels for all 54 numbers
     combined_labels = np.concatenate([labels_main, labels_power_offset]).astype(int)
 
     # Combined centroid strengths per number (this is what other modules use)

@@ -15,10 +15,10 @@ import logging
 NUM_MAIN = 40
 
 # Number of powerball-style balls
-NUM_POWERBALL = 10
+NUM_POWERBALL = 14
 
 # Total symbols in the probability distribution
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL  # = 50
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL  # = 54
 
 # Configure logging output format and verbosity
 logging.basicConfig(

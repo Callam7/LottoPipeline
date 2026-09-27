@@ -12,7 +12,7 @@ import numpy as np
 import logging
 
 NUM_MAIN_NUMBERS = 40
-NUM_POWERBALL_NUMBERS = 10
+NUM_POWERBALL_NUMBERS = 14
 NUM_TOTAL_NUMBERS = NUM_MAIN_NUMBERS + NUM_POWERBALL_NUMBERS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

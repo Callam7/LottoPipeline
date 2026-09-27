@@ -23,7 +23,7 @@ from data_io import save_current_ticket # Import helper to persist the generated
 # =========================
 
 NUM_MAIN_NUMBERS = 40   # Total count of possible main numbers (1..40)
-NUM_POWERBALLS = 10     # Total count of possible Powerball numbers (1..10)
+NUM_POWERBALLS = 14     # Total count of possible Powerball numbers (1..14)
 NUM_PER_LINE = 6        # Number of main numbers selected per ticket line
 NUM_LINES = 12          # Total number of ticket lines to generate
 

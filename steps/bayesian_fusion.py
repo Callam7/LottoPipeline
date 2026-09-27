@@ -22,8 +22,8 @@ _CHI2_CRIT_DF39_0P05 = 55.758          # Threshold to decide if observed bias di
 
 # Constants
 NUM_MAIN = 40                          # Main number count (1–40)
-NUM_POWERBALL = 10                     # Powerball number count (1–10)
-TOTAL_NUMBERS = NUM_MAIN + NUM_POWERBALL  # Total probability vector size (50)
+NUM_POWERBALL = 14                     # Powerball number count (1–14)
+TOTAL_NUMBERS = NUM_MAIN + NUM_POWERBALL  # Total probability vector size (54)
 
 
 def _estimate_mechanics_dirichlet_from_history(historical_data, alpha=1.0):

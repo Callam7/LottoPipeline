@@ -17,8 +17,8 @@ logging.basicConfig(                   # Configure global logging behavior
 )
 
 NUM_MAIN = 40                          # Total possible main lottery numbers (1–40)
-NUM_POWERBALL = 10                     # Total possible Powerball numbers (1–10)
-TOTAL_NUM = NUM_MAIN + NUM_POWERBALL   # Combined output width (50)
+NUM_POWERBALL = 14                     # Total possible Powerball numbers (1–14)
+TOTAL_NUM = NUM_MAIN + NUM_POWERBALL   # Combined output width (54)
 
 
 def analyze_number_frequency(pipeline: Any) -> None:
@@ -27,8 +27,8 @@ def analyze_number_frequency(pipeline: Any) -> None:
 
     Outputs:
         pipeline["number_frequency"]           -> shape (40,)
-        pipeline["powerball_frequency"]        -> shape (10,)
-        pipeline["number_frequency_combined"]  -> shape (50,)
+        pipeline["powerball_frequency"]        -> shape (14,)
+        pipeline["number_frequency_combined"]  -> shape (54,)
     """
 
     historical_data = pipeline.get_data("historical_data")  # Retrieve stored historical draws
@@ -123,10 +123,10 @@ def analyze_number_frequency(pipeline: Any) -> None:
     # SAVE
     # ----------------------
     pipeline.add_data("number_frequency", number_frequency)  # Store main probabilities (40,)
-    pipeline.add_data("powerball_frequency", powerball_frequency)  # Store PB probabilities (10,)
+    pipeline.add_data("powerball_frequency", powerball_frequency)  # Store PB probabilities (14,)
     pipeline.add_data(
         "number_frequency_combined",
-        np.concatenate([number_frequency, powerball_frequency])  # Store combined vector (50,)
+        np.concatenate([number_frequency, powerball_frequency])  # Store combined vector (54,)
     )
 
     logging.info("Number frequency analysis completed.")  # Confirm completion

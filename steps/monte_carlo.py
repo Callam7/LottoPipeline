@@ -14,8 +14,8 @@ import logging      # Logging for runtime diagnostics and monitoring
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 NUM_MAIN = 40            # Total possible main numbers
-NUM_POWERBALL = 10       # Total possible Powerball numbers
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL  # Combined vector length (50)
+NUM_POWERBALL = 14       # Total possible Powerball numbers
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL  # Combined vector length (54)
 NUM_PICK = 6             # Number of main numbers drawn per ticket line
 CLUSTER_MULTIPLIER = 1.2 # Base weight applied to clustering influence
 MIN_PROBABILITY = 1e-8   # Ensures probabilities never become zero (avoids dead categories)
@@ -116,22 +116,22 @@ def monte_carlo_simulation(pipeline):
     num_draws = len(historical_data)                        # Count historical draws
     mc_sims = compute_mc_sims(num_draws)                    # Determine simulation count
 
-    fusion_50 = pipeline.get_data("bayesian_fusion")        # Base probabilities from fusion stage
+    fusion = pipeline.get_data("bayesian_fusion")        # Base probabilities from fusion stage
     clusters = pipeline.get_data("clusters")                # Cluster assignments
     centroids = pipeline.get_data("centroids")              # Cluster centroid strengths
 
-    if fusion_50 is None or clusters is None or centroids is None:
+    if fusion is None or clusters is None or centroids is None:
         logging.warning("Fusion/clustering data missing. Using uniform distribution.")
         pipeline.add_data("monte_carlo", np.ones(NUM_TOTAL) / NUM_TOTAL)
         return
 
-    fusion_50 = np.array(fusion_50, dtype=float)
+    fusion = np.array(fusion, dtype=float)
     clusters = np.array(clusters, dtype=int)
     centroids = np.array(centroids, dtype=float)
 
     # Split main vs Powerball
-    fusion_main = fusion_50[:NUM_MAIN]
-    fusion_power = fusion_50[NUM_MAIN:]
+    fusion_main = fusion[:NUM_MAIN]
+    fusion_power = fusion[NUM_MAIN:]
 
     clusters_main = clusters[:NUM_MAIN]
     centroids_main = centroids[:NUM_MAIN]
