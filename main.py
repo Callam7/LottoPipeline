@@ -45,7 +45,7 @@ from adaptor.assessment import PipelineAssessment
 # Constants
 NUM_PICK_MAIN = 6
 MAX_MAIN_NUMBER = 40
-NUM_POWERBALL = 10
+NUM_POWERBALL = 14
 TICKET_LINES = 12
 
 
@@ -105,7 +105,7 @@ def view_number_stats(pipeline):
         percent = number_frequency[i] * 100
         print(f"{i+1:2d}     | {count:10d}   | {percent:6.2f}%")
 
-    print("\n--- Powerball Frequency (1..10) ---")
+    print("\n--- Powerball Frequency (1..14) ---")
     print("Number | Occurrences | % of Powerball picks")
     total_powerball_picks = len(historical_data)
     for i in range(NUM_POWERBALL):

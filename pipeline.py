@@ -12,7 +12,7 @@ from typing import Any, Dict, Tuple, List  # Type hinting for better clarity and
 
 # Constants defining the lottery structure
 NUM_MAIN_NUMBERS = 40  # Number of main numbers in each draw
-NUM_POWERBALL = 10  # Number of possible Powerball values
+NUM_POWERBALL = 14  # Number of possible Powerball values
 NUM_TOTAL_NUMBERS = NUM_MAIN_NUMBERS + NUM_POWERBALL  # Total number of output dimensions
 TICKET_LINES = 12  # Number of ticket lines to generate
 LINE_SIZE = 6  # Number of main numbers per ticket line
