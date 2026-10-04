@@ -4,8 +4,8 @@ Project: Lotto Generator
 Purpose:
     Deep learning prediction pipeline for lottery probabilities:
         - 40 main numbers
-        - 10 Powerball numbers
-    Output is always shape (50,), compatible with the ticket generator.
+        - 14 Powerball numbers
+    Output is always shape (54,), compatible with the ticket generator.
 Design:
     This module does NOT assume determinism.
     It assumes that if weak signal exists, it should not be suppressed
@@ -39,8 +39,6 @@ from config.quantum_features import ( # Imports quantum feature utilities/consta
 
 from config import quantum_kernels as qk # Imports module itself (to access cache vars)
 from config.quantum_kernels import build_quantum_kernel_features # Builds kernel features
-
-from sklearn.metrics import roc_auc_score
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s") # Set log format/level
 
@@ -148,7 +146,7 @@ def _force_width(M: np.ndarray, width: int, name: str) -> np.ndarray:
 
 def _prob_norm_vec(x: np.ndarray, name: str) -> np.ndarray:
     x = np.asarray(x, dtype=float).ravel() # Flatten to 1D float array
-    if x.size != NUM_TOTAL: # Enforce expected output width (50)
+    if x.size != NUM_TOTAL: # Enforce expected output width (54)
         logging.warning(f"{name} expected len {NUM_TOTAL}, got {x.size}. Padding/truncating.")
         if x.size < NUM_TOTAL:
             x = np.pad(x, (0, NUM_TOTAL - x.size), constant_values=0.0) # Pad with zeros if too short
@@ -156,11 +154,11 @@ def _prob_norm_vec(x: np.ndarray, name: str) -> np.ndarray:
     x = np.clip(x, 0.0, None) # Probabilities must not be negative
     s = float(x.sum()) # Total mass
     if s <= 0.0: # If vector is all zeros (or invalid), fallback to uniform
-        return np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL # Uniform distribution across 50 bins
+        return np.ones(NUM_TOTAL, dtype=float) / NUM_TOTAL # Uniform distribution across 54 bins
     return x / s # Normalise so sum == 1.0
 
 def _build_feature_matrix(
-    F: np.ndarray,  # Prefix frequency matrix (n_draws, 50)
+    F: np.ndarray,  # Prefix frequency matrix (n_draws, 54)
     feature_blocks: List[Tuple[str, np.ndarray]],
 ) -> np.ndarray:
     """Centralized feature matrix builder to keep training and inference identical.
@@ -219,7 +217,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
         return # Exit early
 
     # ---------- Step 2: Build strict multi-hot labels ---------- #
-    labels = [] # Will hold one 50-dim multi-hot vector per historical draw
+    labels = [] # Will hold one 54-dim multi-hot vector per historical draw
     for draw in historical_data: # Iterates over draw dicts
         y = np.zeros(NUM_TOTAL, dtype=float) # Allocates empty label vector
         for n in draw.get("numbers", []): # Pulls main number list; default empty
@@ -227,14 +225,14 @@ def deep_learning_prediction(pipeline: Any) -> None:
                 y[n - 1] = 1.0 # Converts 1-based lotto number to 0-based index
         pb = draw.get("powerball") # Reads powerball field
         if isinstance(pb, int) and 1 <= pb <= NUM_POWERBALL: # Single powerball integer
-            y[NUM_MAIN + pb - 1] = 1.0 # Map to indices 40..49 (0-based)
+            y[NUM_MAIN + pb - 1] = 1.0 # Map to indices 40..53 (0-based)
         elif isinstance(pb, (list, tuple)): # Some sources may store multiple PBs
             for p in pb: # Iterates PB list/tuple
                 if isinstance(p, int) and 1 <= p <= NUM_POWERBALL: # Validate range
                     y[NUM_MAIN + p - 1] = 1.0 # Set PB index as active
         labels.append(y) # Stores label vector for this draw
 
-    Y = np.asarray(labels, dtype=float) # Stack labels into shape (n_draws, 50)
+    Y = np.asarray(labels, dtype=float) # Stack labels into shape (n_draws, 54)
     n_draws = Y.shape[0] # Number of historical examples available
     if n_draws < 10: # Too little data to reasonably train
         pipeline.add_data(
@@ -445,6 +443,8 @@ def deep_learning_prediction(pipeline: Any) -> None:
             learning_rate=learning_rate,
             dropout_rate=dropout_rate,
             batch_size=batch_size,
+            augmentation_rounds=DATA_AUGMENTATION_ROUNDS,
+            noise_stddev=NOISE_STDDEV,
         )
 
         pipeline.add_data("pipe_importance", result.get("ablation", {}))
@@ -452,7 +452,6 @@ def deep_learning_prediction(pipeline: Any) -> None:
         pipeline.add_data("candidate_class", result.get("candidate_class"))
         pipeline.add_data("candidate_pipe", result.get("candidate_pipe"))
         pipeline.add_data("candidate_encoder", result.get("candidate_encoder"))
-        pipeline.add_data("weakest_pipe", result.get("candidate_pipe"))
         if result.get("candidate"):
             logging.info(
                 f"Candidate ({result.get('candidate_class')}): {result.get('candidate')}"
@@ -466,7 +465,6 @@ def deep_learning_prediction(pipeline: Any) -> None:
         pipeline.add_data("candidate_class", None)
         pipeline.add_data("candidate_pipe", None)
         pipeline.add_data("candidate_encoder", None)
-        pipeline.add_data("weakest_pipe", None)
 
     # ---------- Step 13: Inference ---------- #
     s = counts.sum() # Total counts after processing all historical draws
@@ -513,7 +511,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
         return # Exit early to avoid invalid model input
 
     try:
-        dl_pred = model.predict(xf_now, verbose=0).reshape(-1).astype(float) # Run prediction and flatten to (50,)
+        dl_pred = model.predict(xf_now, verbose=0).reshape(-1).astype(float) # Run prediction and flatten to (54,)
     except Exception as e:
         logging.error(f"DL inference failed: {e}") # Report inference failure
         pipeline.add_data(

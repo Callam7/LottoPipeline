@@ -4,12 +4,14 @@
 # Description:
 #   - Drop one fused-feature block, train a fresh model in memory
 #   - No writes to epochs / lotto.db
-#   - Score = baseline_auc - ablated_auc
+#   - Baseline is a full-feature retrain on the same 25-epoch recipe
+#   - Production val AUC is logged only. It is not subtracted.
+#   - Score = full_retrain_auc - ablated_auc
 #   - Positive = block helped (removing it hurt val AUC)
-#   - Zero / negative = unused, or short retrain beat production
+#   - Zero / negative = unused, or short retrain beat the full retrain
 #   - Candidate = lowest score — rewrite inside that file later, do not delete it
-#   - Baseline prefers production val AUC from deep_learning
 #   - Macro AUC skips labels that are all-0 or all-1 in val (PB 11-14 have no history)
+#   - |score| < ZERO_THRESHOLD prints as 0.0000. The stored float is the raw drop.
 
 import logging                         # Ablation progress and skip errors
 from typing import Any, Dict, List, Optional, Tuple  # Types for ranges and scores
@@ -23,7 +25,7 @@ logging.basicConfig(                   # Same stamp format as the rest of the ad
 )
 
 # ===================== Constants ===================== #
-ZERO_THRESHOLD = 0.002                 # |score| below this prints and stores as 0
+ZERO_THRESHOLD = 0.002                 # |score| below this prints as 0.0000
 FALLBACK_AUC = 0.5                     # Used if AUC cannot be computed
 NUM_TOTAL = 54                         # 40 main + 14 powerball
 BLOCK_SIZE = 54                        # Width of one classical block in Xf
@@ -32,9 +34,16 @@ KERNEL_PROTOTYPES = 24                 # Width of quantum_kernels
 ABLATION_EPOCHS = 25                   # Max epochs for each isolated retrain
 ABLATION_BATCH_SIZE = 32               # Default batch if DL does not pass one
 ABLATION_LR = 8e-4                     # Default LR if DL does not pass one
-ABLATION_PATIENCE = 5                  # Early stop patience on val_auc
+ABLATION_PATIENCE = 5                  # Unused by the fit call; kept so old imports do not break
 ABLATION_SEED = 42                     # Keras seed for the ablation head
 ABLATION_DROPOUT = 0.25                # Default dropout if DL does not pass one
+ABLATION_AUG_ROUNDS = 3                # Default; deep learning should pass its own
+ABLATION_NOISE_STDDEV = 0.01           # Default; deep learning should pass its own
+ABLATION_LR_FACTOR = 0.6               # Same plateau factor as production
+ABLATION_LR_PATIENCE = 6               # Same plateau patience as production
+ABLATION_MIN_LR = 5e-6                 # Same floor as production
+ABLATION_ES_PATIENCE = 15              # Same early-stop patience; 25-epoch cap still binds
+ABLATION_ES_MIN_DELTA = 0.0005         # Same min delta as production
 
 CLASSICAL_FEATURE_BLOCKS: List[str] = [  # Order must match DL if using fallback ranges
     "bayesian_fusion_norm",
@@ -70,6 +79,28 @@ def _build_default_ranges() -> Dict[str, Tuple[int, int]]:
     return ranges
 
 
+def _validate_feature_ranges(
+    X: np.ndarray,
+    feature_ranges: Dict[str, Tuple[int, int]],
+) -> None:
+    """Reject a missing block or a range that does not fit X."""
+    expected = set(CLASSICAL_FEATURE_BLOCKS + QUANTUM_FEATURE_BLOCKS)  # The nine names
+    missing = expected - set(feature_ranges)  # Names DL / fallback failed to pass
+    if missing:
+        raise ValueError(f"Ablation ranges missing feature blocks: {sorted(missing)}")
+    if X.ndim != 2:                    # Need a sample x feature matrix
+        raise ValueError(f"Expected 2-D feature matrix, got {X.shape}")
+    width = X.shape[1]                 # Fused width, normally 418
+    for name, feature_range in feature_ranges.items():
+        if name not in COMPONENT_CLASS:  # Unknown name is skipped later, not fatal
+            continue
+        start_col, end_col = feature_range  # Half-open [start, end)
+        if not 0 <= int(start_col) < int(end_col) <= width:
+            raise ValueError(
+                f"Invalid range for '{name}': [{start_col}, {end_col}) with X width {width}"
+            )
+
+
 def _safe_macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """
     Macro AUC over labels that have both classes in y_true.
@@ -80,9 +111,12 @@ def _safe_macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     y_pred = np.asarray(y_pred)        # Predictions
     if y_true.ndim != 2 or y_pred.ndim != 2:
         return FALLBACK_AUC            # Need matrices
-    n_labels = min(y_true.shape[1], y_pred.shape[1])  # Shared column count
+    if y_true.shape != y_pred.shape:   # Do not silently compare a shorter head
+        raise ValueError(
+            f"AUC shape mismatch: y_true={y_true.shape}, y_pred={y_pred.shape}"
+        )
     scores = []                        # One AUC per usable label
-    for j in range(n_labels):
+    for j in range(y_true.shape[1]):
         col = y_true[:, j]             # That label in val
         if col.min() == col.max():     # All 0 or all 1 — skip
             continue
@@ -95,17 +129,16 @@ def _safe_macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(scores))      # Mean of usable labels only
 
 
-def _snap_score(score: float) -> float:
+def _finite_score(score: float) -> float:
+    """Store the measured drop. Print snap happens in _print_score."""
     if not np.isfinite(score):         # nan / inf
-        return 0.0
-    if abs(score) < ZERO_THRESHOLD:    # Noise band
         return 0.0
     return float(score)
 
 
 def _print_score(name: str, score: float) -> None:
     if abs(score) < ZERO_THRESHOLD:
-        print(f"{name:<28} {'0.0000':>18}")  # No + / - on zero
+        print(f"{name:<28} {'0.0000':>18}")  # No + / - on noise
     else:
         print(f"{name:<28} {score:>+18.4f}")
 
@@ -138,12 +171,13 @@ def get_candidate_encoder(importance: Dict[str, float]) -> Optional[str]:
     return get_candidate(importance, "encoder")
 
 
-def get_weak_link(importance: Dict[str, float]) -> Optional[str]:
-    """Old name. Means pipe candidate only."""
-    return get_candidate_pipe(importance)
-
-
 def _drop_column_range(X: np.ndarray, start_col: int, end_col: int) -> np.ndarray:
+    if X.ndim != 2:                    # Need rows x columns
+        raise ValueError(f"X must be 2-D, got shape {X.shape}")
+    if not 0 <= start_col < end_col <= X.shape[1]:  # Half-open and inside width
+        raise ValueError(
+            f"Invalid feature range [{start_col}, {end_col}) for X width {X.shape[1]}"
+        )
     return np.concatenate([X[:, :start_col], X[:, end_col:]], axis=1)  # Drop [start, end)
 
 
@@ -191,6 +225,8 @@ def _train_ablation_model(
     learning_rate: float = ABLATION_LR,
     dropout_rate: float = ABLATION_DROPOUT,
     batch_size: int = ABLATION_BATCH_SIZE,
+    augmentation_rounds: int = ABLATION_AUG_ROUNDS,
+    noise_stddev: float = ABLATION_NOISE_STDDEV,
 ) -> float:
     model = _build_ablation_model(
         input_dim=X_train.shape[1],    # Current width after drop
@@ -199,20 +235,38 @@ def _train_ablation_model(
         learning_rate=learning_rate,
         dropout_rate=dropout_rate,
     )
+    rng = np.random.default_rng(ABLATION_SEED)  # Same noise draw each retrain
+    Xa = [X_train]                     # Original train rows
+    Ya = [Y_train]                     # Labels copied, not noised
+    for _ in range(int(augmentation_rounds)):
+        noise = rng.normal(0.0, float(noise_stddev), X_train.shape)  # Train only
+        Xa.append(X_train + noise)
+        Ya.append(Y_train)
+    Xa = np.vstack(Xa).astype(float)   # Stacked train matrix
+    Ya = np.vstack(Ya).astype(float)   # Matching labels
     model.fit(
-        X_train,
-        Y_train,
-        validation_data=(X_val, Y_val),
+        Xa,
+        Ya,
+        validation_data=(X_val, Y_val),  # Val is never noised
         epochs=ABLATION_EPOCHS,
         batch_size=batch_size,
         callbacks=[
+            keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                mode="min",
+                factor=ABLATION_LR_FACTOR,
+                patience=ABLATION_LR_PATIENCE,
+                min_lr=ABLATION_MIN_LR,
+                verbose=0,
+            ),
             keras.callbacks.EarlyStopping(
                 monitor="val_auc",
                 mode="max",
-                patience=ABLATION_PATIENCE,
+                patience=ABLATION_ES_PATIENCE,
+                min_delta=ABLATION_ES_MIN_DELTA,
                 restore_best_weights=True,
                 verbose=0,
-            )
+            ),
         ],
         verbose=0,                     # No epoch spam
     )
@@ -232,6 +286,8 @@ def compute_retrain_ablation_importance(
     learning_rate: float = ABLATION_LR,
     dropout_rate: float = ABLATION_DROPOUT,
     batch_size: int = ABLATION_BATCH_SIZE,
+    augmentation_rounds: int = ABLATION_AUG_ROUNDS,
+    noise_stddev: float = ABLATION_NOISE_STDDEV,
 ) -> Dict[str, float]:
     if pipe_feature_ranges is None:
         logging.warning(
@@ -240,48 +296,59 @@ def compute_retrain_ablation_importance(
         )
         pipe_feature_ranges = _build_default_ranges()
 
+    _validate_feature_ranges(Xf_train, pipe_feature_ranges)  # Train width must fit
+    _validate_feature_ranges(Xf_val, pipe_feature_ranges)    # Val width must fit
+
     train_kw = dict(                   # Shared kwargs for every retrain
         loss_fn=loss_fn,
         learning_rate=learning_rate,
         dropout_rate=dropout_rate,
         batch_size=batch_size,
+        augmentation_rounds=augmentation_rounds,
+        noise_stddev=noise_stddev,
     )
 
-    if baseline_auc is None and production_auc is not None and np.isfinite(production_auc):
-        baseline_auc = float(production_auc)  # Prefer the live model score
-        logging.info(f"Ablation baseline: production val AUC = {baseline_auc:.4f}")
-    elif baseline_auc is None:
-        logging.info("Ablation baseline: training on full fused features...")
+    if production_auc is not None and np.isfinite(production_auc):
+        logging.info(
+            f"Ablation reference: production val AUC = {float(production_auc):.4f} (not the baseline)"
+        )
+    if baseline_auc is None:           # Normal path: same recipe, all blocks
+        logging.info("Ablation baseline: full-feature retrain, same recipe...")
         baseline_auc = _train_ablation_model(
             Xf_train, Y_train, Xf_val, Y_val, **train_kw
         )
-
     if not np.isfinite(baseline_auc):
         logging.warning("Baseline AUC was not finite — using fallback 0.5")
         baseline_auc = FALLBACK_AUC
 
-    importance: Dict[str, float] = {}  # name -> snapped score
+    importance: Dict[str, float] = {}  # name -> raw score
 
     print("\n" + "=" * 72)
     print("LEAVE-ONE-BLOCK-OUT RETRAIN ABLATION (no DB writes)")
     print("=" * 72)
-    print(f"Baseline Validation AUC: {baseline_auc:.4f}")
+    print(f"Baseline full-retrain AUC: {baseline_auc:.4f}")
+    if production_auc is not None and np.isfinite(production_auc):
+        print(f"Production val AUC       : {float(production_auc):.4f}")
     print(f"Ablation epochs         : {ABLATION_EPOCHS}")
     print("-" * 72)
     print(f"{'Pipe Name':<28} {'Score (drop)':>18}")
     print("-" * 72)
 
     for pipe_name, (start_col, end_col) in pipe_feature_ranges.items():
+        if pipe_name not in COMPONENT_CLASS:  # Not one of the nine
+            logging.warning(f"Skipping unexpected feature block '{pipe_name}'.")
+            continue
         logging.info(f"Ablation retrain without '{pipe_name}'...")
         Xtr = _drop_column_range(Xf_train, start_col, end_col)  # Train minus block
         Xva = _drop_column_range(Xf_val, start_col, end_col)    # Val minus block
         ablated_auc = _train_ablation_model(Xtr, Y_train, Xva, Y_val, **train_kw)
-        score = _snap_score(float(baseline_auc - ablated_auc))  # Drop vs baseline
+        score = _finite_score(float(baseline_auc - ablated_auc))  # Raw drop vs full retrain
         importance[pipe_name] = score
         _print_score(pipe_name, score)
 
     candidate = get_candidate(importance)  # Lowest of all nine
     print("-" * 72)
+
     if candidate is not None:
         val = importance[candidate]
         kind = COMPONENT_CLASS.get(candidate, "pipe")
@@ -301,11 +368,13 @@ def compute_importance(
     Xf_train: Optional[np.ndarray] = None,
     Y_train: Optional[np.ndarray] = None,
     pipe_feature_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
-    production_auc: Optional[float] = None,
+    production_auc: Optional[float] = None,  # Logged only. Not the baseline.
     loss_fn: Any = None,
     learning_rate: float = ABLATION_LR,
     dropout_rate: float = ABLATION_DROPOUT,
     batch_size: int = ABLATION_BATCH_SIZE,
+    augmentation_rounds: int = ABLATION_AUG_ROUNDS,
+    noise_stddev: float = ABLATION_NOISE_STDDEV,
     **_: Any,                          # Ignore extra kwargs from older call sites
 ) -> Dict[str, Any]:
     if Xf_train is None or Y_train is None:
@@ -316,7 +385,6 @@ def compute_importance(
             "candidate_class": None,
             "candidate_pipe": None,
             "candidate_encoder": None,
-            "weak_link": None,
         }
 
     abl_scores = compute_retrain_ablation_importance(
@@ -330,6 +398,8 @@ def compute_importance(
         learning_rate=learning_rate,
         dropout_rate=dropout_rate,
         batch_size=batch_size,
+        augmentation_rounds=augmentation_rounds,
+        noise_stddev=noise_stddev,
     )
     cand = get_candidate(abl_scores)   # Global lowest
     kind = COMPONENT_CLASS.get(cand) if cand else None
@@ -341,5 +411,4 @@ def compute_importance(
         "candidate_class": kind,
         "candidate_pipe": pipe_cand,
         "candidate_encoder": enc_cand,
-        "weak_link": pipe_cand,        # Old key: pipe only
     }
