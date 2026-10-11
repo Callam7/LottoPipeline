@@ -10,7 +10,7 @@
 ## - Uses ONE representative cluster per draw (mean cluster or mode cluster).
 ## - Builds proper cluster→cluster Markov transitions across draws.
 ## - Redundancy weighting applied AFTER Markov probabilities (safe).
-## - Fully normalized shape-(50,) output.
+## - Fully normalized shape-(54,) output.
 
 import numpy as np                      # Numerical library for arrays and matrix math
 import logging                          # Logging system for warnings and info messages

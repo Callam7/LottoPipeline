@@ -1,4 +1,4 @@
-## Modified By: Callam
+ï»¿## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose of File: Mechanics Estimation + Bayesian Fusion
 ## Description:
@@ -21,8 +21,8 @@ logging.basicConfig(                   # Configure logging format and verbosity
 _CHI2_CRIT_DF39_0P05 = 55.758          # Threshold to decide if observed bias differs from uniform
 
 # Constants
-NUM_MAIN = 40                          # Main number count (1–40)
-NUM_POWERBALL = 14                     # Powerball number count (1–14)
+NUM_MAIN = 40                          # Main number count (1ï¿½40)
+NUM_POWERBALL = 14                     # Powerball number count (1ï¿½14)
 TOTAL_NUMBERS = NUM_MAIN + NUM_POWERBALL  # Total probability vector size (54)
 
 
@@ -62,7 +62,7 @@ def bayesian_fusion_with_mechanics(pipeline, alpha=1.0, chi2_threshold=_CHI2_CRI
                                    use_mechanics_if_significant=True, verbose=False,
                                    weights=(1.0, 1.0, 1.0)):
     """
-    Combine frequency, decay, and mechanics into normalized posterior of shape 50.
+    Combine frequency, decay, and mechanics into normalized posterior of shape 54.
     Main numbers: uses mechanics + frequency + decay.
     Powerball: uniform mechanics (or optionally separate mechanics in the future).
     """
@@ -128,7 +128,7 @@ def bayesian_fusion_with_mechanics(pipeline, alpha=1.0, chi2_threshold=_CHI2_CRI
         w_m * np.log(mechanics_powerball + eps)
     )
 
-    # Concatenate into shape 50
+    # Concatenate into shape 54
     posterior = np.concatenate([posterior_main, posterior_powerball])
 
     # Normalize total posterior

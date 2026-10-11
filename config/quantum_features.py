@@ -312,7 +312,7 @@ def train_quantum_encoder(
     pb_dim = max(0, label_dim - main_dim)  # Remaining labels are powerball section
 
     # Fixed regime split: 9 qubits for main, remainder for powerball.
-    # This mapping is domain-specific to current Lotto NZ (40 main + 10 Powerball).
+    # This mapping is domain-specific to current Lotto NZ (40 main + 14 Powerball).
     main_qubits = 9  # Qubits allocated to main numbers
     pb_qubits = NUM_QUBITS - main_qubits  # Qubits allocated to powerball
 

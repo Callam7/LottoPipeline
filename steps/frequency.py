@@ -2,10 +2,10 @@
 ## Project: Lotto Generator
 ## Purpose of File: To Analyze and Normalize Lottery Number Frequencies (fixed)
 ## Description:
-## Computes normalized frequency for main (1..40) and Powerball (1..10).
+## Computes normalized frequency for main (1..40) and Powerball (1..14).
 ## Handles powerball values that may be stored as ints or lists.
-## Stores "number_frequency" (40,), "powerball_frequency" (10,), and
-## "number_frequency_combined" (50,) in the pipeline.
+## Stores "number_frequency" (40,), "powerball_frequency" (14,), and
+## "number_frequency_combined" (54,) in the pipeline.
 
 import numpy as np                     # Numerical library for fast counting and normalization
 import logging                         # Logging for warnings and progress messages

@@ -1,11 +1,11 @@
 ## Modified By: Callam
 ## Project: Lotto Generator
-## Purpose of File: Compute Shannon Entropy Features (Shape 50)
+## Purpose of File: Compute Shannon Entropy Features (Shape 54)
 ##
 ## Description:
 ## Computes Shannon entropy contribution for each lottery number:
 ##     H_i = -p_i * log2(p_i)
-## using the Bayesian-fused unified probability distribution (shape 50).
+## using the Bayesian-fused unified probability distribution (shape 54).
 ## Produces a mathematically correct, normalized entropy feature vector.
 
 import numpy as np
@@ -29,10 +29,10 @@ logging.basicConfig(
 
 def shannon_entropy_features(pipeline):
     """
-    Compute Shannon entropy contributions for each number (1–50).
+    Compute Shannon entropy contributions for each number (1–54).
 
     Uses the Bayesian fusion probability distribution as input.
-    Produces a normalized entropy feature vector of shape (50,).
+    Produces a normalized entropy feature vector of shape (54,).
 
     NOTE:
     - This computes per-symbol entropy terms, not total entropy.
@@ -48,7 +48,7 @@ def shannon_entropy_features(pipeline):
             "Fusion distribution missing — fallback to uniform entropy features."
         )
 
-        # Create a uniform probability distribution over 50 symbols
+        # Create a uniform probability distribution over 54 symbols
         uniform = np.ones(NUM_TOTAL) / NUM_TOTAL
 
         # Compute Shannon entropy contribution per symbol:

@@ -3,9 +3,9 @@
 ## Purpose of File: Perform Monte Carlo Simulations on Lottery Number Probabilities
 ## Description:
 ##   Runs Monte Carlo simulations to generate a frequency distribution
-##   for main (1-40) and Powerball (1-10) numbers.
+##   for main (1-40) and Powerball (1-14) numbers.
 ##   Uses Bayesian fusion and clustering to adjust probabilities,
-##   then simulates draws and returns a shape-(50,) probability vector.
+##   then simulates draws and returns a shape-(54,) probability vector.
 
 import numpy as np  # Numerical operations and random sampling
 import logging      # Logging for runtime diagnostics and monitoring
@@ -75,7 +75,7 @@ def run_main_simulations(numbers_prob, mc_sims):
 def run_powerball_simulations(power_prob, mc_sims):
     """Monte Carlo draws of 1 Powerball per simulation."""
     power_prob = np.asarray(power_prob, dtype=float)        # Ensure float probabilities
-    numbers = np.arange(1, NUM_POWERBALL + 1)               # Possible PB numbers 1..10
+    numbers = np.arange(1, NUM_POWERBALL + 1)               # Possible PB numbers 1..14
     picks = np.random.choice(
         numbers,
         size=mc_sims,
@@ -151,7 +151,7 @@ def monte_carlo_simulation(pipeline):
     power_picks = run_powerball_simulations(prob_power, mc_sims)
     monte_carlo_power = calculate_distribution(power_picks, NUM_POWERBALL)
 
-    # Combine into one vector of length 50
+    # Combine into one vector of length 54
     combined = np.concatenate((monte_carlo_main, monte_carlo_power)).astype(float)
     s = combined.sum()
     if s <= 0 or not np.isfinite(s):

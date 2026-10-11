@@ -45,7 +45,7 @@ def initialize_database():
             draw_date TEXT NOT NULL UNIQUE,    -- Unique date of the draw
             numbers TEXT NOT NULL,             -- Comma-separated main numbers
             bonus INTEGER NOT NULL CHECK (bonus BETWEEN 1 AND 40),
-            powerball INTEGER NOT NULL CHECK (powerball BETWEEN 1 AND 10)
+            powerball INTEGER NOT NULL CHECK (powerball BETWEEN 1 AND 14)
         );
         """
         cursor.execute(create_draws_table_sql)

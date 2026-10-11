@@ -108,7 +108,7 @@ def generate_ticket(pipeline):
     # ---------------------------------------------
 
     predictions = pipeline.get_data("deep_learning_predictions")  # Retrieve model output from pipeline
-    expected_len = NUM_MAIN_NUMBERS + NUM_POWERBALLS               # Expected vector length (40 + 10)
+    expected_len = NUM_MAIN_NUMBERS + NUM_POWERBALLS               # Expected vector length (40 + 14)
 
 
     # ---------------------------------------------
