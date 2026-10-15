@@ -20,8 +20,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Constants
 NUM_MAIN = 40
-NUM_POWERBALL = 10
-TOTAL_NUMBERS = NUM_MAIN + NUM_POWERBALL  # 50
+NUM_POWERBALL = 14
+TOTAL_NUMBERS = NUM_MAIN + NUM_POWERBALL  # 54
 
 
 def _safe_parse_date(date_value):
@@ -57,8 +57,8 @@ def _safe_parse_date(date_value):
 def calculate_decay_factors(pipeline, decay_rate: float = 0.98):
     """
     Calculates decay-weighted frequency distributions for main numbers (1-40)
-    and Powerball numbers (1-10), normalizes separately, and concatenates into
-    a single shape-(50,) array stored in the pipeline as 'decay_factors'.
+    and Powerball numbers (1-14), normalizes separately, and concatenates into
+    a single shape-(54,) array stored in the pipeline as 'decay_factors'.
 
     More recent draws receive higher weight (decay_factor close to 1),
     older draws receive exponentially smaller weights.

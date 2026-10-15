@@ -43,11 +43,11 @@ def process_historical_data(results, pipeline):
         return  # Exit the function early since there is no data to process.
 
     # Step 3: Validates the historical data.
-    ## Valid Powerball Range: Powerball numbers must be integers between 1 and 10.
+    ## Valid Powerball Range: Powerball numbers must be integers between 1 and 14.
     # Uses a list comprehension to filter out invalid draws.
     valid_historical_data = [
         draw for draw in historical_data
-        if 1 <= draw.get("powerball", 0) <= 10  # Use 0 as a fallback if the "powerball" key is missing.
+        if 1 <= draw.get("powerball", 0) <= 14  # Use 0 as a fallback if the "powerball" key is missing.
     ]
 
     # Step 4: Stores the filtered data into the pipeline.

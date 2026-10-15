@@ -8,7 +8,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import numpy as np
 from datetime import datetime
 
 # Database functions
@@ -38,11 +37,15 @@ from steps.markov import markov_features
 from steps.entropy import shannon_entropy_features
 from steps.bayesian_fusion import bayesian_fusion_with_mechanics
 from steps.deep_learning import deep_learning_prediction
+# Adaptor software imports
+from adaptor.optuna_bridge import run_optuna_bridge
+from adaptor.runtime_observer import RuntimeObserver
+from adaptor.assessment import PipelineAssessment
 
 # Constants
 NUM_PICK_MAIN = 6
 MAX_MAIN_NUMBER = 40
-NUM_POWERBALL = 10
+NUM_POWERBALL = 14
 TICKET_LINES = 12
 
 
@@ -102,7 +105,7 @@ def view_number_stats(pipeline):
         percent = number_frequency[i] * 100
         print(f"{i+1:2d}     | {count:10d}   | {percent:6.2f}%")
 
-    print("\n--- Powerball Frequency (1..10) ---")
+    print("\n--- Powerball Frequency (1..14) ---")
     print("Number | Occurrences | % of Powerball picks")
     total_powerball_picks = len(historical_data)
     for i in range(NUM_POWERBALL):
@@ -130,6 +133,10 @@ def main():
     initialize_database()
     verify_draw_order()
     pipeline = DataPipeline()
+    observer = RuntimeObserver(pipeline)
+    # Creates the structural assessor once
+    assessor = PipelineAssessment()
+    assessor.discover_all_files()
 
     while True:
         print("\n--- Lotto Predictor Menu ---")
@@ -202,6 +209,7 @@ def main():
             # --- Full Pipeline Execution ---
             all_draws = fetch_all_draws()
             pipeline.clear_pipeline()
+            observer.start_new_run()                    
             pipeline.add_data("historical_data", all_draws)
 
             safe_run(lambda p: process_historical_data({"past_results": all_draws}, p), pipeline, "Historical Processing")
@@ -219,7 +227,9 @@ def main():
             print("\nNew ticket generated:")
             for idx, line in enumerate(new_ticket, 1):
                 print(f"Line {idx}: {line['line']} | Powerball: {line['powerball']}")
-
+            # === Run Optuna Bridge AFTER everything is complete ===
+            # It will check the last 6 runs and suggest changes if needed
+            run_optuna_bridge(pipeline, assessor=assessor, observer=observer)
         elif choice == "4":
             view_number_stats(pipeline)
 

@@ -2,10 +2,10 @@
 ## Project: Lotto Generator
 ## Purpose of File: To Analyze and Normalize Lottery Number Frequencies (fixed)
 ## Description:
-## Computes normalized frequency for main (1..40) and Powerball (1..10).
+## Computes normalized frequency for main (1..40) and Powerball (1..14).
 ## Handles powerball values that may be stored as ints or lists.
-## Stores "number_frequency" (40,), "powerball_frequency" (10,), and
-## "number_frequency_combined" (50,) in the pipeline.
+## Stores "number_frequency" (40,), "powerball_frequency" (14,), and
+## "number_frequency_combined" (54,) in the pipeline.
 
 import numpy as np                     # Numerical library for fast counting and normalization
 import logging                         # Logging for warnings and progress messages
@@ -17,8 +17,8 @@ logging.basicConfig(                   # Configure global logging behavior
 )
 
 NUM_MAIN = 40                          # Total possible main lottery numbers (1–40)
-NUM_POWERBALL = 10                     # Total possible Powerball numbers (1–10)
-TOTAL_NUM = NUM_MAIN + NUM_POWERBALL   # Combined output width (50)
+NUM_POWERBALL = 14                     # Total possible Powerball numbers (1–14)
+TOTAL_NUM = NUM_MAIN + NUM_POWERBALL   # Combined output width (54)
 
 
 def analyze_number_frequency(pipeline: Any) -> None:
@@ -27,8 +27,8 @@ def analyze_number_frequency(pipeline: Any) -> None:
 
     Outputs:
         pipeline["number_frequency"]           -> shape (40,)
-        pipeline["powerball_frequency"]        -> shape (10,)
-        pipeline["number_frequency_combined"]  -> shape (50,)
+        pipeline["powerball_frequency"]        -> shape (14,)
+        pipeline["number_frequency_combined"]  -> shape (54,)
     """
 
     historical_data = pipeline.get_data("historical_data")  # Retrieve stored historical draws
@@ -123,10 +123,10 @@ def analyze_number_frequency(pipeline: Any) -> None:
     # SAVE
     # ----------------------
     pipeline.add_data("number_frequency", number_frequency)  # Store main probabilities (40,)
-    pipeline.add_data("powerball_frequency", powerball_frequency)  # Store PB probabilities (10,)
+    pipeline.add_data("powerball_frequency", powerball_frequency)  # Store PB probabilities (14,)
     pipeline.add_data(
         "number_frequency_combined",
-        np.concatenate([number_frequency, powerball_frequency])  # Store combined vector (50,)
+        np.concatenate([number_frequency, powerball_frequency])  # Store combined vector (54,)
     )
 
     logging.info("Number frequency analysis completed.")  # Confirm completion

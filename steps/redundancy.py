@@ -1,4 +1,4 @@
-## Modified By: Callam
+ï»¿## Modified By: Callam
 ## Project: Lotto Generator
 ## Purpose: Sequential / Temporal Features (Strict, Cluster-Integrated)
 ## Description:
@@ -6,13 +6,13 @@
 ## - Unbiased gap modeling (initial, internal, final gaps).
 ## - Variance normalization so recency/gap contribute comparably.
 ## - Clustering centroids are always applied; if invalid, a neutral vector is used.
-## - Output is a unified feature vector of shape (50,).
+## - Output is a unified feature vector of shape (54,).
 
 import numpy as np
 import logging
 
 NUM_MAIN_NUMBERS = 40
-NUM_POWERBALL_NUMBERS = 10
+NUM_POWERBALL_NUMBERS = 14
 NUM_TOTAL_NUMBERS = NUM_MAIN_NUMBERS + NUM_POWERBALL_NUMBERS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -109,7 +109,7 @@ def sequential_features(pipeline):
         pipeline.add_data("redundancy", np.ones(NUM_TOTAL_NUMBERS) / NUM_TOTAL_NUMBERS)
         return
 
-    # ===================== MAIN (1–40) =====================
+    # ===================== MAIN (1â€“40) =====================
     recency_main = calculate_recency_features(historical_data, "numbers", NUM_MAIN_NUMBERS)
     gap_main = calculate_gap_frequency(historical_data, "numbers", NUM_MAIN_NUMBERS)
 
@@ -119,7 +119,7 @@ def sequential_features(pipeline):
 
     combined_main = (recency_main / rec_main_std + gap_main / gap_main_std) / 2.0
 
-    # ===================== POWERBALL (1–10) =====================
+    # ===================== POWERBALL (1â€“10) =====================
     recency_power = calculate_recency_features(historical_data, "powerball", NUM_POWERBALL_NUMBERS)
     gap_power = calculate_gap_frequency(historical_data, "powerball", NUM_POWERBALL_NUMBERS)
 
@@ -128,7 +128,7 @@ def sequential_features(pipeline):
 
     combined_power = (recency_power / rec_power_std + gap_power / gap_power_std) / 2.0
 
-    # ===================== COMBINE (50,) =====================
+    # ===================== COMBINE (54,) =====================
     combined_features = np.concatenate((combined_main, combined_power)).astype(float)
 
     # ===================== CLUSTER MODULATION (ALWAYS APPLIED) =====================

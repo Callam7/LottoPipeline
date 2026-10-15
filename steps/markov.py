@@ -10,14 +10,14 @@
 ## - Uses ONE representative cluster per draw (mean cluster or mode cluster).
 ## - Builds proper cluster→cluster Markov transitions across draws.
 ## - Redundancy weighting applied AFTER Markov probabilities (safe).
-## - Fully normalized shape-(50,) output.
+## - Fully normalized shape-(54,) output.
 
 import numpy as np                      # Numerical library for arrays and matrix math
 import logging                          # Logging system for warnings and info messages
 
 NUM_MAIN = 40                           # Number of main lottery numbers
-NUM_POWERBALL = 10                      # Number of Powerball numbers
-NUM_TOTAL = NUM_MAIN + NUM_POWERBALL    # Total output length (50 probabilities)
+NUM_POWERBALL = 14                      # Number of Powerball numbers
+NUM_TOTAL = NUM_MAIN + NUM_POWERBALL    # Total output length (54 probabilities)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 # Configure logging format and default log level
