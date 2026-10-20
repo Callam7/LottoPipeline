@@ -1,14 +1,14 @@
 # Lotto Generator
 
-** Author’s Note **
+**Author’s Note**
 
 Before anything else: this project does **not** guarantee lottery predictions. Lotto NZ is a heavily regulated system, independently audited, and engineered to be fair at all times. Nothing in this repository overrides that fact, and nothing here should be treated as a promise of “winning numbers.” This project exists as a technical experiment — not a loophole.
 
-It started as a personal challenge to the idea that Lotto is “just random.” The rules never change: main numbers 1–40, Powerball 1–10. That makes it pseudo-random rather than chaotic. If anything meaningful exists in the structure, it should be measurable; if nothing exists, proving that is valuable too. What began as a small script grew into a full analytical and machine-learning pipeline designed to test structure, extract behavior, and see how far adaptive modelling can be pushed against a system intentionally designed to resist prediction.
+It started as a personal challenge to the idea that Lotto is “just random.” The rules never change: main numbers 1–40, Powerball 1–14. That makes it pseudo-random rather than chaotic. If anything meaningful exists in the structure, it should be measurable; if nothing exists, proving that is valuable too. What began as a small script grew into a full analytical and machine-learning pipeline designed to test structure, extract behavior, and see how far adaptive modelling can be pushed against a system intentionally designed to resist prediction.
 
-Over time the project shifted from “generate numbers” to a much larger goal: building the foundations of a self-adapting model — something capable of training on its own history, monitoring its performance, and modifying its own internal logic when needed. Lotto simply provides a stable sandbox to explore those ideas.
+Over time the project shifted from “generate numbers” to a much larger goal: building the foundations of a self-adapting model — something capable of training on its own history, monitoring its performance, and modifying its own internal logic when needed. Lotto simply provides a stable sandbox to explore those ideas. Stage 1 of that system (the Info layer) is now implemented and lives in `adaptor/`.
 
-As for the tools behind it: Python is my preferred language and the one I’m most fluent in. I know enough about other languages to an extent, such as C#, C++, Kotlin, SQL, and typescript, but Python gives me just a bit more flexibility, clarity, and ecosystem support required for something this experimental.
+As for the tools behind it: Python is my preferred language and the one I’m most fluent in. I know enough about other languages to an extent, such as C#, C++, Kotlin, SQL, and TypeScript, but Python gives me just a bit more flexibility, clarity, and ecosystem support required for something this experimental.
 
 ---
 
@@ -16,16 +16,17 @@ As for the tools behind it: Python is my preferred language and the one I’m mo
 
 The **Lotto Generator** is a Python application that analyzes historical lottery data and generates tickets based on multiple statistical and machine learning methods.
 
-It uses a pipeline of “pipes” — statistical analysis, clustering, Monte Carlo simulation, Markov chains, Shannon entropy, Bayesian fusion with mechanics estimation, quantum-enhanced features, and deep learning. Each pipe produces features from the historical draws, which are combined and used to train the deep learning model.
+It uses a pipeline of “pipes” — statistical analysis, clustering, Monte Carlo simulation, Markov chains, Shannon entropy, Bayesian fusion with mechanics estimation, quantum-enhanced features, and deep learning. Each pipe produces features from the historical draws, which are combined and used to train the deep learning model. All feature vectors are now 54-dimensional (40 main numbers + 14 Powerball).
 
-The long-term goal is for the pipeline to update and re-train itself automatically as new draws come in, with the aim of improving accuracy while avoiding overfitting. For now, Lotto is just the sandbox for testing these methods.
+The long-term goal is for the pipeline to update and re-train itself automatically as new draws come in, with the aim of improving accuracy while avoiding overfitting. Stage 1 (Info layer) is complete: it observes structure and runtime behavior, scores feature blocks via ablation, and writes a decision record when a batch does not improve. Later stages will search for replacements, simulate them safely, and apply changes only when the evidence supports it. For now, Lotto is just the sandbox for testing these methods.
 
 ---
 
 ## Table of Contents
 1. [Installation Instructions](#installation-instructions)  
 2. [Pipeline Explanation](#pipeline-explanation)  
-3. [Future Additions](#future-additions)  
+3. [Stage 1 Adaptor (Info Layer)](#stage-1-adaptor-info-layer)  
+4. [Future Additions](#future-additions)  
 
 ---
 
@@ -199,7 +200,7 @@ To set up the project locally, follow these step-by-step instructions for your o
 1. **Clone the Repository**:  
    - Run:
      ```bash
-     git clone https://gitlab.com/Callam7/LottoPipeline.git
+     git clone https://github.com/Callam7/LottoPipeline.git
      cd LottoPipeline
      ```
 2. **Install Python Dependencies** (using Python 3.12):
@@ -216,28 +217,27 @@ To set up the project locally, follow these step-by-step instructions for your o
      # or
      python3.12 main.py # Linux/macOS
      ```
-
 You're now ready to use the Lotto Generator!
 
 ---
 
 ## Pipeline Explanation
 
-The Lotto Pipeline is designed to simulate, analyze, and predict lottery outcomes using a series of interconnected steps. Each module contributes a specific functionality to the final output: a ticket with 12 lines of lottery numbers and corresponding Powerball numbers. Below is a chronological breakdown of the pipeline flow.
+The Lotto Pipeline is designed to simulate, analyze, and predict lottery outcomes using a series of interconnected steps. Each module contributes a specific functionality to the final output: a ticket with 12 lines of lottery numbers and corresponding Powerball numbers. Below is a chronological breakdown of the pipeline flow. All core feature vectors are now 54-dimensional (40 main + 14 Powerball).
 
 ### **Core: Data Pipeline & Database**
 **Module:** `pipeline.py` + `database.py`  
 **Functionality**: Central data store and persistent storage.  
 **How it works**  
-`DataPipeline` is a simple but powerful dict wrapper with `add_data`, `get_data`, and `clear_pipeline`. Every single pipe in the entire system reads from and writes to this object — it is the single source of truth. The `database.py` file handles SQLite persistence: it creates the `draws` table (with stable `draw_id`, unique `draw_date`, comma-separated numbers, bonus 1–40, powerball 1–10) and the new `epochs` table (for deep-learning metrics). Functions like `insert_draw`, `fetch_all_draws`, `fetch_recent_draws`, and `insert_epoch_metrics` ensure safe insertion and retrieval.  
+`DataPipeline` is a simple but powerful dict wrapper with `add_data`, `get_data`, and `clear_pipeline`. Every single pipe in the entire system reads from and writes to this object — it is the single source of truth. The `database.py` file handles SQLite persistence: it creates the `draws` table (with stable `draw_id`, unique `draw_date`, comma-separated numbers, bonus 1–40, powerball 1–14) and the `epochs` table (for deep-learning metrics). Functions like `insert_draw`, `fetch_all_draws`, `fetch_recent_draws`, and `insert_epoch_metrics` ensure safe insertion and retrieval.  
 **Why it’s important**  
-Without this central hub and persistent storage, data would leak between steps and there would be no way to log training history for future self-editing.
+Without this central hub and persistent storage, data would leak between steps and there would be no way to log training history for the Stage 1 Adaptor and future self-editing stages.
 
 ### **Step 1: Historical Data Processing**
 **Module:** `steps/historical.py`  
 **Functionality**: First pipe — loads and cleans draws.  
 **How it works**  
-It receives `{"past_results": [...]}` from the database, filters out any draw where `powerball` is not an integer between 1 and 10, and stores the clean list under the key `"historical_data"`.  
+It receives `{"past_results": [...]}` from the database, filters out any draw where `powerball` is not an integer between 1 and 14, and stores the clean list under the key `"historical_data"`.  
 **Why it’s important**  
 This is the foundation — every later calculation (frequencies, decay, fusion, quantum training, etc.) depends on this validated data.
 
@@ -245,7 +245,7 @@ This is the foundation — every later calculation (frequencies, decay, fusion, 
 **Module:** `steps/frequency.py`  
 **Functionality**: Global occurrence probabilities.  
 **How it works**  
-It loops through all historical draws, collects every valid main number (1–40) and Powerball (handles both int and list formats), uses `np.bincount` to count occurrences, and normalises to probabilities. It stores three vectors: main (40,), Powerball (10,), and combined (50,). Invalid numbers are logged as warnings.  
+It loops through all historical draws, collects every valid main number (1–40) and Powerball (handles both int and list formats), uses `np.bincount` to count occurrences, and normalises to probabilities. It stores three vectors: main (40,), Powerball (14,), and combined (54,). Invalid numbers are logged as warnings.  
 **Why it’s important**  
 This is the baseline occurrence signal that decay, Bayesian fusion, Monte Carlo, and deep learning all build upon.
 
@@ -253,7 +253,7 @@ This is the baseline occurrence signal that decay, Bayesian fusion, Monte Carlo,
 **Module:** `steps/decay.py`  
 **Functionality**: Recency weighting.  
 **How it works**  
-It parses every draw date (robust `_safe_parse_date` that handles strings and datetime objects), finds the most recent date, calculates weeks since then for each draw, applies exponential decay `decay_factor = 0.98 ** weeks_passed`, accumulates weighted counts separately for main and Powerball, normalises each group, and concatenates to a (50,) vector stored as `"decay_factors"`.  
+It parses every draw date (robust `_safe_parse_date` that handles strings and datetime objects), finds the most recent date, calculates weeks since then for each draw, applies exponential decay `decay_factor = 0.98 ** weeks_passed`, accumulates weighted counts separately for main and Powerball, normalises each group, and concatenates to a (54,) vector stored as `"decay_factors"`.  
 **Why it’s important**  
 Recent draws carry more influence — this adds temporal bias without discarding older data.
 
@@ -277,7 +277,7 @@ It reveals hidden groupings that raw frequencies miss.
 **Module:** `steps/monte_carlo.py`  
 **Functionality**: Sampling-based probability estimation.  
 **How it works**  
-It dynamically sets simulation count based on data size, adjusts fusion probabilities by cluster centroids, runs main-number simulations (no replacement) and Powerball simulations, counts outcomes, normalises, and stores the (50,) vector as `"monte_carlo"`.  
+It dynamically sets simulation count based on data size, adjusts fusion probabilities by cluster centroids, runs main-number simulations (no replacement) and Powerball simulations, counts outcomes, normalises, and stores the (54,) vector as `"monte_carlo"`.  
 **Why it’s important**  
 It adds robustness through repeated random sampling.
 
@@ -301,7 +301,7 @@ It models sequence dependencies across draws.
 **Module:** `steps/entropy.py`  
 **Functionality**: Per-symbol unpredictability.  
 **How it works**  
-It takes the Bayesian fusion probabilities, computes the Shannon entropy contribution `-p_i * log2(p_i)` for each of the 50 numbers (with safe clipping), normalises the vector to sum to 1, and stores it as `"entropy_features"`.  
+It takes the Bayesian fusion probabilities, computes the Shannon entropy contribution `-p_i * log2(p_i)` for each of the 54 numbers (with safe clipping), normalises the vector to sum to 1, and stores it as `"entropy_features"`.  
 **Why it’s important**  
 It highlights which numbers are most “random” versus structured.
 
@@ -325,7 +325,7 @@ It adds entangled representations and similarity-based features that are fused d
 **Module:** `steps/deep_learning.py`  
 **Functionality**: Final nonlinear synthesis.  
 **How it works**  
-It builds a causal prefix-frequency matrix, reweights it by all upstream signals, tiles centroids/clusters/quantum predictions, adds the quantum matrix and kernel features, trains a feed-forward network with weighted BCE (positives-only weighting, no label smoothing), mild Gaussian augmentation, and val_auc early stopping. The final (50,) vector is stored as `"deep_learning_predictions"`.  
+It builds a causal prefix-frequency matrix, reweights it by all upstream signals, tiles centroids/clusters/quantum predictions, adds the quantum matrix and kernel features, trains a feed-forward network with weighted BCE (positives-only weighting, no label smoothing), mild Gaussian augmentation, and val_auc early stopping. The final (54,) vector is stored as `"deep_learning_predictions"`.  
 **Why it’s important**  
 This is the core predictive model that turns every prior signal into the final probabilities.
 
@@ -350,16 +350,44 @@ It provides clean persistence for the menu and future use.
 **How it works**  
 It inherits from `tf.keras.callbacks.Callback`, runs after every epoch, extracts all metrics (handling both legacy and new names), and calls `insert_epoch_metrics` to store them in the `epochs` table grouped by `run_date`. A small sleep prevents DB contention.  
 **Why it’s important**  
-It enables the future self-editing model by logging full training history.
+It feeds the Stage 1 Adaptor with the peak validation AUC and batch history required for skip-gates and decision records.
+
+---
+
+## Stage 1 Adaptor (Info Layer)
+
+**Location:** `adaptor/`  
+**Status:** Implemented (report-only)
+
+The Adaptor is the beginning of the self-adapting system. Stage 1 does **not** rewrite code, search for new methods, or modify any files in `steps/` or `config/`. It only observes, scores, and writes a decision record.
+
+Four modules work together after a training batch:
+
+- **`assessment.py`** — Walks `steps/` and `config/` as text (does not import or run them). Discovers `get_data` / `add_data` keys, identifies encoder files, and builds a structural map of the pipeline.
+- **`runtime_observer.py`** — Hooks `pipeline.add_data` to record what actually ran: types, shapes, numeric statistics (min/max/mean/std), entropy, and L1 distance from uniform for probability vectors. Produces a compact per-key summary and deltas versus the previous run.
+- **`ablation.py`** — Performs leave-one-block-out retraining in memory (no writes to `lotto.db`). Drops one fused feature block, trains a fresh head, and scores the impact as `baseline_auc - ablated_auc`. Positive scores mean the block helped. The lowest score becomes the single candidate for review.
+- **`optuna_bridge.py`** — Does **not** run Optuna. It reads the last six date batches from the `epochs` table (epoch count, average val AUC, peak val AUC). If the latest peak is more than 0.005 above the median of the earlier peaks (or fewer than two batches exist), it skips. Otherwise it emits one decision record and stores it on the pipeline under `adaptor_decision`.
+
+Decision actions:
+- `methodology_review` — pipe candidate (later stages will look inside that step file)
+- `encoder_review` — encoder candidate
+- `stack_review` — no candidate (all ablation scores were near zero)
+
+A detailed assessment dump is written only when the candidate is a pipe. Full documentation lives in `adaptor/README.md`.
 
 ---
 
 ## Future Additions
 
-My next focus will be on implementing thorough pytesting for each pipeline step to ensure correctness, stability, and consistent outputs. Automated tests will validate input handling, edge cases, and integration between pipes.
+Stage 1 (Info layer) is complete. Logging of epoch metrics and runtime observation are in place, and the ablation + decision-record path is operational. The system can now name a single under-performing component after a non-improving batch without touching source code.
 
-Following testing, I will plan on building a comprehensive logging system that captures detailed metrics and stats for every epoch and pipeline execution. These logs will be stored systematically for auditing, debugging, and performance tracking over time.
+Next stages (planned, not yet implemented):
 
-Finally, I plan to integrate automation that leverages a self-editing model. This model will dynamically adapt the pipeline by analyzing logs and test results, enabling continuous improvement and fine-tuning of prediction accuracy and processing efficiency without manual intervention. Essentially, a algorithm that evolves its own code based on performance. The theory is that as it evolves and changes, it will have improving performance that will eventually reach pin-point accurate prediction capabilities.
+| Stage | Role | Status |
+|-------|------|--------|
+| 2 Search | Find a similar method or parameter set for the named candidate (Semantic Scholar, arXiv, local search, etc.) | Planned |
+| 3 Simulate | Build and score candidate replacements without writing to `lotto.db` | Planned |
+| 4 Isolated apply | Patch a copy of the step/encoder, not the live files, until a gate passes | Planned |
+| 5 Keep or revert | Compare the next real peak; drop the backup if kept, restore if not | Planned |
 
----
+The design rule remains: never edit two components in the same cycle, never delete a step outright, and only promote a change when the next real validation peak improves. The long-term theory is that successive, evidence-gated adaptations will gradually raise the ceiling of what the pipeline can extract from a regulated, near-uniform process. Lotto NZ remains the sandbox; the Adaptor is the instrument.
