@@ -37,10 +37,13 @@ from steps.markov import markov_features
 from steps.entropy import shannon_entropy_features
 from steps.bayesian_fusion import bayesian_fusion_with_mechanics
 from steps.deep_learning import deep_learning_prediction
+
 # Adaptor software imports
 from adaptor.optuna_bridge import run_optuna_bridge
 from adaptor.runtime_observer import RuntimeObserver
 from adaptor.assessment import PipelineAssessment
+from adaptor.search.brief import build_brief
+from adaptor.search.retrieve import Retrieve
 
 # Constants
 NUM_PICK_MAIN = 6
@@ -222,14 +225,35 @@ def main():
             safe_run(markov_features, pipeline, "Markov Features")
             safe_run(shannon_entropy_features, pipeline, "Entropy Features")
             safe_run(deep_learning_prediction, pipeline, "Deep Learning Prediction")
+
             # --- Generate Ticket ---
             new_ticket = generate_ticket(pipeline)
             print("\nNew ticket generated:")
             for idx, line in enumerate(new_ticket, 1):
                 print(f"Line {idx}: {line['line']} | Powerball: {line['powerball']}")
+
             # === Run Optuna Bridge AFTER everything is complete ===
             # It will check the last 6 runs and suggest changes if needed
+            # Ablation results are already written to the pipeline by deep_learning.py
             run_optuna_bridge(pipeline, assessor=assessor, observer=observer)
+            # Stage 2 brief. Reads the packet the bridge just stored. No search.
+            decision = pipeline.get_data("adaptor_decision")  # None if the batch improved
+            repo_root = os.path.dirname(os.path.abspath(__file__))  # Folder that holds steps/ and config/
+            scope = build_brief(decision, repo_root)  # Local imprint only
+            if scope is None:                  # No packet, stack_review, or file not found
+                print("Stage 2 brief: no viable scope")
+            else:
+                print("Stage 2 brief:")
+                print(f"  file     : {scope['target_file']}")
+                print(f"  key      : {scope['output_key']} ({scope['width']}, {scope['kind']})")
+                print(f"  queries  : {scope['queries']}")
+                print(f"  contract : {scope['contract']}")
+                retriever = Retrieve()         # OpenAlex + arXiv clients. Exa still empty.
+                hits = retriever.run(scope)    # Uses queries and similar_urls only
+                print(f"Stage 2 retrieve: {len(hits)} hit(s)")
+                for hit in hits:               # Proof the search used the brief
+                    print(f"  {hit['source']}: {hit['title'][:80]}")
+
         elif choice == "4":
             view_number_stats(pipeline)
 
@@ -243,4 +267,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

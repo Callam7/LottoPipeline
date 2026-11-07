@@ -1,20 +1,24 @@
 ﻿# Modified By: Callam
 # Project: Lotto Generator
-# Purpose: Optuna Bridge - Stage 1 (report-only decision context)
+# Purpose: Optuna Bridge - Stage 1 (report-only decision context + hyperparameter study)
 # Description:
 #   - Compares latest training batch to recent history (peak val AUC)
-#   - If improved: skip (no adaptor action)
-#   - If not improved: emit a decision record
-#       * pipe candidate → methodology_review
-#       * encoder candidate → encoder_review
-#       * no candidate → stack_review
+#   - If improved (beats noise-scaled median AND previous best): skip
+#   - If not improved:
+#       * Run a short Optuna study to produce better hyperparameters
+#       * Emit a decision record
+#           * pipe candidate → methodology_review
+#           * encoder candidate → encoder_review
+#           * no candidate → stack_review
 #   - Pulls structure from assessment and runtime from the observer
-#   - Does not rewrite code. Does not search hyperparameters.
-
+#   - Does not rewrite code. Stores best params for the next training run.
 import logging                         # Writes the Stage 1 log lines
 import sqlite3                         # Opens lotto.db for the epochs query
-import statistics                      # Median of previous peak AUCs
+import statistics                      # Median and std of previous peak AUCs
 from typing import Any, Dict, Optional # Types for pipeline / context dicts
+
+import optuna                          # Hyperparameter search (Stage 1 study)
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 logging.basicConfig(                   # One log format for this module
     level=logging.INFO,                # INFO and above
@@ -29,7 +33,6 @@ CANDIDATE_ENCODER_KEY = "candidate_encoder"  # Pipeline key when the winner is a
 CANDIDATE_KEY = "candidate"            # Pipeline key for the single winner name
 CANDIDATE_CLASS_KEY = "candidate_class"  # Pipeline key: "pipe" or "encoder"
 ENCODER_BLOCKS = ("quantum_features", "quantum_kernels")  # Names treated as encoders
-MIN_IMPROVEMENT = 0.005                # Skip report if latest peak - median > this
 
 PIPE_TO_FILENAME = {                   # Ablation block name -> file basename
     "bayesian_fusion_norm": "bayesian_fusion.py",  # Fusion step
@@ -42,6 +45,10 @@ PIPE_TO_FILENAME = {                   # Ablation block name -> file basename
     "quantum_features": "quantum_features.py",  # Encoder module
     "quantum_kernels": "quantum_kernels.py",    # Encoder module
 }
+
+# Optuna study settings (Stage 1 only — short, non-destructive)
+OPTUNA_N_TRIALS = 8                    # Max trials when a batch under-performed
+OPTUNA_TIMEOUT = 180                   # Hard time limit in seconds
 
 
 def get_last_six_runs() -> list:       # Newest six date-batches from epochs
@@ -75,7 +82,8 @@ def get_last_six_runs() -> list:       # Newest six date-batches from epochs
 def compare_latest_to_previous(runs: list) -> tuple[bool, float]:
     """
     Skip-gate uses peak val AUC (index 3), not epoch average (index 2).
-    should_skip = True → latest peak beat the recent median by MIN_IMPROVEMENT.
+    should_skip = True only if the latest peak is a genuine improvement
+    over recent history (beats both the noise-scaled median and the previous best).
     """
     if len(runs) < 2:                  # Need this run plus at least one prior
         return True, 0.0               # Skip the decision record
@@ -85,12 +93,34 @@ def compare_latest_to_previous(runs: list) -> tuple[bool, float]:
     previous_peaks = [r[3] for r in runs[1:] if r[3] is not None]  # Older peaks
     if not previous_peaks:             # Nothing to compare against
         return True, 0.0               # Skip
-    median_prev = statistics.median(previous_peaks)  # Median of those peaks
-    delta = latest_peak - median_prev  # Positive = this batch higher
-    if delta > MIN_IMPROVEMENT:        # Beat the bar
-        logging.info(f"Latest batch IMPROVED (peak delta = {delta:+.4f})")
+
+    median_prev = statistics.median(previous_peaks)          # Median of those peaks
+    best_prev = max(previous_peaks)                          # Highest previous peak
+    delta = latest_peak - median_prev                        # Positive = this batch higher
+
+    # Dynamic bar: scales with recent noise, with a floor so it never becomes tiny
+    if len(previous_peaks) >= 2:
+        noise = statistics.pstdev(previous_peaks)
+    else:
+        noise = 0.0
+    dynamic_bar = max(0.008, 1.0 * noise)
+
+    # Must clear both conditions
+    median_ok = delta > dynamic_bar
+    best_ok = latest_peak > best_prev
+
+    if median_ok and best_ok:
+        logging.info(
+            f"Latest batch IMPROVED "
+            f"(delta={delta:+.4f}, bar={dynamic_bar:.4f}, "
+            f"best_prev={best_prev:.4f})"
+        )
         return True, delta             # Skip report
-    logging.info(f"Latest batch did NOT improve (peak delta = {delta:+.4f})")
+    logging.info(
+        f"Latest batch did NOT improve "
+        f"(delta={delta:+.4f}, bar={dynamic_bar:.4f}, "
+        f"best_prev={best_prev:.4f})"
+    )
     return False, delta                # Build report
 
 
@@ -121,16 +151,13 @@ def build_decision_context(
     if pipeline is None:               # Nothing to read
         logging.error("Pipeline object not provided.")
         return None
-
     importance = pipeline.get_data(PIPE_IMPORTANCE_KEY) or {}  # Score dict
     cand = pipeline.get_data(CANDIDATE_KEY) or pipeline.get_data(WEAKEST_PIPE_KEY)  # Winner name
     kind = pipeline.get_data(CANDIDATE_CLASS_KEY)  # "pipe" / "encoder" / None
     if kind is None and cand:          # Class missing — infer from name
         kind = "encoder" if cand in ENCODER_BLOCKS else "pipe"
-
     pipe_cand = cand if kind == "pipe" else None      # Set only for pipes
     enc_cand = cand if kind == "encoder" else None    # Set only for encoders
-
     if cand and kind == "pipe":        # Step-file candidate
         action = "methodology_review"
         reason = (
@@ -147,7 +174,6 @@ def build_decision_context(
         action = "stack_review"
         reason = "Stage 1 report only. No candidate (all ablation scores ≈ 0)."
         logging.info("No actionable candidate — stack_review.")
-
     context: Dict[str, Any] = {        # Record written to the pipeline later
         "candidate": cand,             # Single winner name
         "candidate_class": kind,       # pipe | encoder | None
@@ -160,7 +186,6 @@ def build_decision_context(
         "action": action,              # methodology_review | encoder_review | stack_review
         "reason": reason,              # One-line why
     }
-
     if assessor is not None and pipe_cand:  # Structure only for pipes
         try:
             summary = assessor.get_pipe_summary()  # Basename -> file facts
@@ -174,7 +199,6 @@ def build_decision_context(
                         break
         except Exception as e:
             logging.warning(f"Could not retrieve structural info: {e}")
-
     if observer is not None:           # Attach this-run summaries
         try:
             run_summary = observer.get_run_summary()  # Read-only
@@ -184,8 +208,75 @@ def build_decision_context(
                 context["runtime_deltas"] = run_summary.get("deltas", {})
         except Exception as e:
             logging.warning(f"Could not retrieve runtime summary: {e}")
-
     return context                     # Ready to log and store
+
+
+def _optuna_objective(trial: optuna.Trial, pipeline: Any) -> float:
+    """
+    Real short training objective for Stage 1.
+    Pulls matrices stored by deep_learning.py.
+    Does not use EpochLogger (no writes to the live epochs table).
+    """
+    Xf_train = pipeline.get_data("Xf_train")
+    Y_train = pipeline.get_data("Y_train")
+    Xf_val = pipeline.get_data("Xf_val")
+    Y_val = pipeline.get_data("Y_val")
+
+    if any(x is None for x in (Xf_train, Y_train, Xf_val, Y_val)):
+        return 0.5
+
+    params = {
+        "learning_rate": trial.suggest_float("learning_rate", 1e-4, 3e-3, log=True),
+        "dropout_rate": trial.suggest_float("dropout_rate", 0.10, 0.40),
+        "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
+        "epochs": trial.suggest_int("epochs", 10, 25),
+    }
+
+    import tensorflow as tf
+    from tensorflow import keras
+
+    keras.backend.clear_session()
+
+    model = keras.Sequential([
+        keras.layers.Input(shape=(Xf_train.shape[1],)),
+        keras.layers.Dense(128, activation="relu"),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(params["dropout_rate"]),
+        keras.layers.Dense(64, activation="relu"),
+        keras.layers.BatchNormalization(),
+        keras.layers.Dropout(params["dropout_rate"]),
+        keras.layers.Dense(32, activation="relu"),
+        keras.layers.Dense(54, activation="sigmoid"),
+    ])
+
+    model.compile(
+        optimizer=keras.optimizers.Adam(
+            learning_rate=params["learning_rate"],
+            clipnorm=1.0,
+        ),
+        loss="binary_crossentropy",
+        metrics=[keras.metrics.AUC(name="auc", multi_label=True)],
+    )
+
+    history = model.fit(
+        Xf_train,
+        Y_train,
+        validation_data=(Xf_val, Y_val),
+        epochs=params["epochs"],
+        batch_size=params["batch_size"],
+        verbose=0,
+        callbacks=[
+            keras.callbacks.EarlyStopping(
+                monitor="val_auc",
+                mode="max",
+                patience=4,
+                restore_best_weights=True,
+            )
+        ],
+    )
+
+    val_aucs = history.history.get("val_auc", [0.5])
+    return float(max(val_aucs))
 
 
 def run_optuna_bridge(
@@ -208,64 +299,56 @@ def run_optuna_bridge(
     if should_skip:                    # Peak improved enough
         return
 
+    # === Optuna study (only when the batch did not improve) ===
+    if pipeline is not None:
+        logging.info("Starting Stage 1 Optuna study (short, non-destructive)")
+        study = optuna.create_study(direction="maximize")  # Higher val AUC is better
+        study.optimize(
+            lambda trial: _optuna_objective(trial, pipeline),
+            n_trials=OPTUNA_N_TRIALS,
+            timeout=OPTUNA_TIMEOUT,
+            show_progress_bar=False,   # Keep logs clean
+        )
+        best = study.best_params      # Dict deep_learning.py already expects
+        pipeline.add_data("optuna_best_params", best)
+        pipeline.add_data("optuna_study_summary", {
+            "best_value": study.best_value,
+            "n_trials": len(study.trials),
+            "best_params": best,
+        })
+        logging.info(f"Optuna best params stored: {best}")
+        logging.info(f"Optuna best value: {study.best_value:.4f}")
+
+    # Existing decision-record path (unchanged)
     context = build_decision_context(pipeline, assessor, observer)
     if context is None:                # No pipeline
         return
 
     logging.info("=== Stage 1 Decision Context ===")
-    logging.info(f"Candidate          : {context.get('candidate')}")
-    logging.info(f"Candidate class    : {context.get('candidate_class')}")
+    cand = context.get("candidate")
+    kind = context.get("candidate_class")
+    logging.info(f"Candidate          : {cand} ({kind})")
 
-    importance = context.get("importance") or {}  # Score table
-    key = context.get("candidate")     # Winner name
-    if key and key in importance and importance[key] is not None:
-        val = importance[key]          # Ablation score
-        if abs(val) < 1e-12:           # Treat tiny as zero print
-            logging.info("Ablation score     : 0.0000")
-        else:
-            logging.info(f"Ablation score     : {val:+.6f}")
+    importance = context.get("importance") or {}
+    if cand and cand in importance and importance[cand] is not None:
+        logging.info(f"Ablation score     : {importance[cand]:+.4f}")
 
-    structural = context.get("structural")  # Assessment row or None
-    if structural:                     # Pipe path only
+    structural = context.get("structural")
+    if structural:
         logging.info(f"Source file        : {structural.get('file_path', 'N/A')}")
         logging.info(f"Functions          : {structural.get('function_count', 0)}")
-        logging.info(f"Reads              : {structural.get('reads', [])}")
-        logging.info(f"Outputs            : {structural.get('outputs', [])}")
-        if structural.get("data_movement"):
-            logging.info(f"Data movement      : {structural['data_movement']}")
 
-    runtime_summary = context.get("runtime_summary") or {}  # Observer stats
-    weak_output_key = _resolve_runtime_key(
-        context.get("candidate"),      # Look up the winner only
-        runtime_summary,
-        structural,
-    )
+    runtime_summary = context.get("runtime_summary") or {}
+    weak_output_key = _resolve_runtime_key(cand, runtime_summary, structural)
     if weak_output_key and weak_output_key in runtime_summary:
-        logging.info(f"Runtime summary for '{weak_output_key}':")
-        for k, v in runtime_summary[weak_output_key].items():
-            logging.info(f"    {k}: {v}")
-    else:
-        logging.info("Runtime summary: not available for this block")
+        stats = runtime_summary[weak_output_key]
+        logging.info(f"Runtime ({weak_output_key}):")
+        for k in ("mean", "std", "entropy", "l1_vs_uniform"):
+            if k in stats and isinstance(stats[k], float):
+                logging.info(f"  {k:<16} {stats[k]:.4f}")
 
-    runtime_deltas = context.get("runtime_deltas") or {}  # Vs previous run
-    if weak_output_key and weak_output_key in runtime_deltas:
-        d = runtime_deltas[weak_output_key]
-        if d.get("comparable"):
-            if "delta_entropy" in d:
-                logging.info(f"Feature delta: entropy {d['delta_entropy']:+.6f}")
-            elif "delta_std" in d:
-                logging.info(f"Feature delta: std {d['delta_std']:+.6f}")
-            elif "delta_mean" in d:
-                logging.info(f"Feature delta: mean {d['delta_mean']:+.6f}")
-            else:
-                logging.info("Feature delta: comparable (no numeric field)")
-        else:
-            logging.info(
-                f"Feature delta: not comparable ({d.get('reason', 'unknown')})"
-            )
-
-    logging.info(f"Recommended action: {context['action']}")
-    logging.info(f"Reason: {context['reason']}")
+    logging.info(f"Action             : {context['action']}")
+    logging.info(f"Reason             : {context['reason']}")
     logging.info("================================")
 
     if pipeline is not None:
