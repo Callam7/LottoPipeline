@@ -44,6 +44,7 @@ from adaptor.runtime_observer import RuntimeObserver
 from adaptor.assessment import PipelineAssessment
 from adaptor.search.brief import build_brief
 from adaptor.search.retrieve import Retrieve
+from adaptor.search.extract import Extract
 
 # Constants
 NUM_PICK_MAIN = 6
@@ -248,11 +249,18 @@ def main():
                 print(f"  key      : {scope['output_key']} ({scope['width']}, {scope['kind']})")
                 print(f"  queries  : {scope['queries']}")
                 print(f"  contract : {scope['contract']}")
-                retriever = Retrieve()         # OpenAlex + arXiv clients. Exa still empty.
+                retriever = Retrieve()         # OpenAlex + arXiv + Exa
                 hits = retriever.run(scope)    # Uses queries and similar_urls only
                 print(f"Stage 2 retrieve: {len(hits)} hit(s)")
                 for hit in hits:               # Proof the search used the brief
                     print(f"  {hit['source']}: {hit['title'][:80]}")
+                if not hits:                   # Nothing to read
+                    print("Stage 2 extract: skipped")
+                else:
+                    pages = Extract().run(hits)  # Jina. Allowlist. Attach markdown.
+                    print(f"Stage 2 extract: {len(pages)} page(s)")
+                    for page in pages:         # Proof the page was read
+                        print(f"  {page['source']}: {len(page.get('markdown', ''))} chars")
 
         elif choice == "4":
             view_number_stats(pipeline)
