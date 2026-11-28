@@ -8,6 +8,14 @@
 # -*- coding: utf-8 -*-
 
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
+import logging
+import warnings
+
+warnings.filterwarnings("ignore", message=".*reset_default_graph is deprecated.*")
+
+
 from datetime import datetime
 
 # Database functions
@@ -45,6 +53,13 @@ from adaptor.assessment import PipelineAssessment
 from adaptor.search.brief import build_brief
 from adaptor.search.retrieve import Retrieve
 from adaptor.search.extract import Extract
+from adaptor.search.judge import Judge
+
+class _DropGraphWarning(logging.Filter):
+    def filter(self, record):
+        return "reset_default_graph is deprecated" not in record.getMessage()
+
+logging.getLogger().addFilter(_DropGraphWarning())
 
 # Constants
 NUM_PICK_MAIN = 6
@@ -261,6 +276,14 @@ def main():
                     print(f"Stage 2 extract: {len(pages)} page(s)")
                     for page in pages:         # Proof the page was read
                         print(f"  {page['source']}: {len(page.get('markdown', ''))} chars")
+
+                    if not pages:
+                        print("Stage 2 judge: skipped")
+                    else:
+                        shortlist = Judge().run(scope, pages)
+                        print(f"Stage 2 judge: {len(shortlist)} method(s)")
+                        for row in shortlist:
+                            print(f"  {row['rank']}. {row['method']} | {row['url']}")
 
         elif choice == "4":
             view_number_stats(pipeline)

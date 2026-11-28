@@ -342,6 +342,7 @@ if __name__ == "__main__":             # Local check. No search.
     root = os.getcwd()                 # Run this from the repo root
     result = build_brief(fake, root)   # Local imprint only
     if result is None:
+        
         print("no brief")              # File missing, or queries empty
     else:
         print(result["target_file"])   # Resolved path

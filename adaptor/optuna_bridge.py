@@ -49,6 +49,7 @@ PIPE_TO_FILENAME = {                   # Ablation block name -> file basename
 # Optuna study settings (Stage 1 only — short, non-destructive)
 OPTUNA_N_TRIALS = 8                    # Max trials when a batch under-performed
 OPTUNA_TIMEOUT = 180                   # Hard time limit in seconds
+MIN_IMPROVEMENT = 0.005                # Skip report if latest peak - median > this
 
 
 def get_last_six_runs() -> list:       # Newest six date-batches from epochs
@@ -82,46 +83,31 @@ def get_last_six_runs() -> list:       # Newest six date-batches from epochs
 def compare_latest_to_previous(runs: list) -> tuple[bool, float]:
     """
     Skip-gate uses peak val AUC (index 3), not epoch average (index 2).
-    should_skip = True only if the latest peak is a genuine improvement
-    over recent history (beats both the noise-scaled median and the previous best).
+    should_skip = True only if latest peak beats the median of older peaks
+    by more than MIN_IMPROVEMENT. The best older peak is logged, not used.
     """
     if len(runs) < 2:                  # Need this run plus at least one prior
-        return True, 0.0               # Skip the decision record
-    latest_peak = runs[0][3]           # Peak column of newest row
-    if latest_peak is None:            # No peak stored
-        return False, 0.0              # Do not skip
-    previous_peaks = [r[3] for r in runs[1:] if r[3] is not None]  # Older peaks
+        logging.info("Skip gate: fewer than 2 batches. Skipping report.")
+        return True, 0.0
+    latest_peak = runs[0][3]           # Peak column of the newest row
+    if latest_peak is None:            # No peak stored for this batch
+        logging.info("Skip gate: latest peak missing. Building report.")
+        return False, 0.0
+    previous_peaks = [r[3] for r in runs[1:] if r[3] is not None]  # Older peaks only
     if not previous_peaks:             # Nothing to compare against
-        return True, 0.0               # Skip
-
-    median_prev = statistics.median(previous_peaks)          # Median of those peaks
-    best_prev = max(previous_peaks)                          # Highest previous peak
-    delta = latest_peak - median_prev                        # Positive = this batch higher
-
-    # Dynamic bar: scales with recent noise, with a floor so it never becomes tiny
-    if len(previous_peaks) >= 2:
-        noise = statistics.pstdev(previous_peaks)
-    else:
-        noise = 0.0
-    dynamic_bar = max(0.008, 1.0 * noise)
-
-    # Must clear both conditions
-    median_ok = delta > dynamic_bar
-    best_ok = latest_peak > best_prev
-
-    if median_ok and best_ok:
-        logging.info(
-            f"Latest batch IMPROVED "
-            f"(delta={delta:+.4f}, bar={dynamic_bar:.4f}, "
-            f"best_prev={best_prev:.4f})"
-        )
-        return True, delta             # Skip report
+        logging.info("Skip gate: no prior peaks. Skipping report.")
+        return True, 0.0
+    median_prev = statistics.median(previous_peaks)  # This is the comparison
+    best_prev = max(previous_peaks)    # Logged only. Not used in the gate.
+    delta = latest_peak - median_prev  # Positive = this batch higher than the median
+    improved = delta > MIN_IMPROVEMENT  # Bar is the constant, not a computed value
     logging.info(
-        f"Latest batch did NOT improve "
-        f"(delta={delta:+.4f}, bar={dynamic_bar:.4f}, "
-        f"best_prev={best_prev:.4f})"
+        "Skip gate: latest={:.4f} median={:.4f} best={:.4f} "
+        "delta={:+.4f} bar={:.4f} improved={}".format(
+            latest_peak, median_prev, best_prev, delta, MIN_IMPROVEMENT, improved
+        )
     )
-    return False, delta                # Build report
+    return improved, delta             # True skips the report
 
 
 def _resolve_runtime_key(

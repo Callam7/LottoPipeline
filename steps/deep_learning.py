@@ -445,11 +445,13 @@ def deep_learning_prediction(pipeline: Any) -> None:
             seed=1337 # Seed must match cache semantics used earlier
         )
         k_now = _force_width(k_now_raw, KERNEL_PROTOTYPES, "k_now") # Enforce fixed kernel feature width
+
     except Exception:
         k_now = np.zeros((1, KERNEL_PROTOTYPES)) # Fallback to zeros if kernel step fails
     pipeline.add_data("quantum_features", np.asarray(q_now, dtype=float).ravel())
     pipeline.add_data("quantum_kernels", np.asarray(k_now, dtype=float).ravel())
     xf_now = np.column_stack((x_now, q_now, k_now)).astype(float) # Fuse classical + quantum + kernel for inference
+
     if xf_now.shape[1] != input_dim: # Hard check: inference feature width must match model input width
         logging.error(
             f"Inference width mismatch: got {xf_now.shape[1]}, expected {input_dim}" # Log exact mismatch
@@ -465,6 +467,7 @@ def deep_learning_prediction(pipeline: Any) -> None:
         pipeline.add_data(
             "deep_learning_predictions", np.ones(NUM_TOTAL) / NUM_TOTAL # Uniform fallback
         )
+
         return # Exit early
     pipeline.add_data(
         "deep_learning_predictions", # Store output in pipeline
